@@ -276,7 +276,8 @@ tokio = "1"
         .unwrap();
 
         let info = resolve_project_root(&sub).unwrap();
-        assert_eq!(info.name, "api");
+        // Nested detection: inner "api" prefixed by parent "mono-root"
+        assert_eq!(info.name, "mono-root/api");
         assert_eq!(info.framework.as_deref(), Some("express"));
     }
 

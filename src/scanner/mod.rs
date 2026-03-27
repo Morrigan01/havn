@@ -58,6 +58,15 @@ async fn scan_and_update(
         }
     }
 
+    // Remove stale registry entries for system paths that are no longer active.
+    // These can accumulate when the filter is tightened (e.g. /opt/homebrew).
+    for project in registry.get_all_projects() {
+        if project.ports.is_empty() && is_system_process(&project.path) {
+            registry.remove_project(project.id);
+            tracing::info!("Removed system project '{}' from registry", project.name);
+        }
+    }
+
     // Always send scan_completed so the dashboard knows we're alive.
     let _ = tx.send(WsEvent::ScanCompleted {
         timestamp: chrono::Utc::now().to_rfc3339(),
@@ -146,11 +155,9 @@ fn is_system_process(cwd: &str) -> bool {
         "/Library/",
         "/sbin/",
         "/private/",
-        "/opt/homebrew/Cellar/",
-        "/opt/homebrew/opt/",
+        "/opt/homebrew",
+        "/usr/local/Cellar/",
     ];
-    // Processes running from homebrew service dirs (postgres, redis) are kept
-    // if their cwd is the homebrew prefix — but filtered if deep in Cellar
     system_prefixes.iter().any(|prefix| cwd.starts_with(prefix))
 }
 
@@ -196,11 +203,12 @@ mod tests {
         assert!(is_system_process("/usr/sbin/httpd"));
         assert!(is_system_process("/Library/Apple/something"));
         assert!(is_system_process("/opt/homebrew/Cellar/node/21.0/bin/node"));
+        assert!(is_system_process("/opt/homebrew"));
+        assert!(is_system_process("/opt/homebrew/var/postgresql@16"));
         assert!(is_system_process("/private/var/something"));
 
         assert!(!is_system_process("/Users/dev/my-project"));
         assert!(!is_system_process("/home/dev/my-project"));
-        assert!(!is_system_process("/opt/homebrew")); // bare homebrew prefix is not filtered
     }
 
     #[test]
