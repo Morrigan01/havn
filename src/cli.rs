@@ -1,0 +1,274 @@
+use clap::{Parser, Subcommand};
+use std::path::PathBuf;
+
+#[derive(Parser)]
+#[command(name = "scanprojects", about = "Map local ports to project directories")]
+pub struct Cli {
+    /// Port for the dashboard server
+    #[arg(short, long, default_value = "9390")]
+    pub port: u16,
+
+    /// Address to bind to
+    #[arg(short, long, default_value = "127.0.0.1")]
+    pub bind: String,
+
+    #[command(subcommand)]
+    pub command: Option<Command>,
+}
+
+#[derive(Subcommand)]
+pub enum Command {
+    /// Show all projects and ports
+    Status,
+    /// Kill a process by port number or project name
+    Kill {
+        /// Port number or project name
+        target: String,
+    },
+    /// Register a project directory
+    Add {
+        /// Path to project directory
+        path: PathBuf,
+    },
+    /// Unregister a project
+    Remove {
+        /// Project name or path
+        target: String,
+    },
+    /// Get or set configuration
+    Config {
+        /// Configuration key
+        key: String,
+        /// Configuration value (omit to read)
+        value: Option<String>,
+    },
+    /// Tail the server log file
+    Logs,
+    /// Start MCP server (stdio transport for AI tools)
+    Mcp,
+    /// Install as a system service (launchd/systemd)
+    InstallService,
+}
+
+pub async fn status(args: &Cli) {
+    let url = format!("http://{}:{}/projects", args.bind, args.port);
+    match reqwest::get(&url).await {
+        Ok(resp) => match resp.json::<Vec<crate::api::ProjectResponse>>().await {
+            Ok(projects) => {
+                if projects.is_empty() {
+                    println!("No projects detected. Start a dev server and run again.");
+                    return;
+                }
+                println!(
+                    "{:<20} {:<12} {:<15} {:<10}",
+                    "PROJECT", "FRAMEWORK", "PORTS", "UPTIME"
+                );
+                println!("{}", "-".repeat(60));
+                for p in &projects {
+                    let ports: Vec<String> = p.ports.iter().map(|p| format!(":{}", p)).collect();
+                    let framework = p.framework.as_deref().unwrap_or("-");
+                    println!(
+                        "{}{:<20} {:<12} {:<15} {}",
+                        if p.favorite { "★ " } else { "  " },
+                        p.name,
+                        framework,
+                        ports.join(" "),
+                        format_uptime(p.uptime_seconds),
+                    );
+                }
+            }
+            Err(e) => eprintln!("Failed to parse response: {}", e),
+        },
+        Err(_) => {
+            println!("Server not running. Performing one-shot scan...");
+            one_shot_scan().await;
+        }
+    }
+}
+
+async fn one_shot_scan() {
+    let results = crate::scanner::scan_once().await;
+    if results.is_empty() {
+        println!("No listening ports detected.");
+        return;
+    }
+    println!(
+        "{:<20} {:<12} {:<10}",
+        "PROJECT", "FRAMEWORK", "PORT"
+    );
+    println!("{}", "-".repeat(45));
+    for entry in &results {
+        let name = entry
+            .project_name
+            .as_deref()
+            .unwrap_or("(unknown)");
+        let framework = entry.framework.as_deref().unwrap_or("-");
+        println!("{:<20} {:<12} :{}", name, framework, entry.port);
+    }
+}
+
+pub async fn kill(args: &Cli, target: &str) {
+    let url = if let Ok(port) = target.parse::<u16>() {
+        format!("http://{}:{}/kill/{}", args.bind, args.port, port)
+    } else {
+        // Try to find project by name first
+        let projects_url = format!("http://{}:{}/projects", args.bind, args.port);
+        match reqwest::get(&projects_url).await {
+            Ok(resp) => {
+                if let Ok(projects) = resp.json::<Vec<crate::api::ProjectResponse>>().await {
+                    if let Some(p) = projects.iter().find(|p| p.name == target) {
+                        format!(
+                            "http://{}:{}/projects/{}/kill",
+                            args.bind, args.port, p.id
+                        )
+                    } else {
+                        eprintln!("Project '{}' not found.", target);
+                        return;
+                    }
+                } else {
+                    eprintln!("Failed to fetch projects.");
+                    return;
+                }
+            }
+            Err(_) => {
+                eprintln!("Server not running. Start with `scanprojects` first.");
+                return;
+            }
+        }
+    };
+
+    let client = reqwest::Client::new();
+    match client.post(&url).send().await {
+        Ok(resp) if resp.status().is_success() => {
+            println!("Killed: {}", target);
+        }
+        Ok(resp) => {
+            let body = resp.text().await.unwrap_or_default();
+            eprintln!("Kill failed: {}", body);
+        }
+        Err(e) => eprintln!("Error: {}", e),
+    }
+}
+
+pub async fn add(args: &Cli, path: &std::path::Path) {
+    let abs_path = std::fs::canonicalize(path).unwrap_or_else(|_| {
+        eprintln!("Path does not exist: {}", path.display());
+        std::process::exit(1);
+    });
+
+    let url = format!("http://{}:{}/projects", args.bind, args.port);
+    let client = reqwest::Client::new();
+    let body = serde_json::json!({ "path": abs_path.to_string_lossy() });
+    match client.post(&url).json(&body).send().await {
+        Ok(resp) if resp.status().is_success() => {
+            println!("Added: {}", abs_path.display());
+        }
+        Ok(resp) => {
+            let body = resp.text().await.unwrap_or_default();
+            eprintln!("Failed: {}", body);
+        }
+        Err(_) => eprintln!("Server not running. Start with `scanprojects` first."),
+    }
+}
+
+pub async fn remove(args: &Cli, target: &str) {
+    let projects_url = format!("http://{}:{}/projects", args.bind, args.port);
+    let resp = match reqwest::get(&projects_url).await {
+        Ok(r) => r,
+        Err(_) => {
+            eprintln!("Server not running. Start with `scanprojects` first.");
+            return;
+        }
+    };
+
+    let projects: Vec<crate::api::ProjectResponse> = match resp.json().await {
+        Ok(p) => p,
+        Err(_) => {
+            eprintln!("Failed to parse response.");
+            return;
+        }
+    };
+
+    let project = match projects.iter().find(|p| p.name == target || p.path == target) {
+        Some(p) => p,
+        None => {
+            eprintln!("Project '{}' not found.", target);
+            return;
+        }
+    };
+
+    let url = format!("http://{}:{}/projects/{}", args.bind, args.port, project.id);
+    let client = reqwest::Client::new();
+    let del_resp = client.delete(&url).send().await;
+    match del_resp {
+        Ok(r) if r.status().is_success() => println!("Removed: {}", target),
+        _ => eprintln!("Failed to remove project."),
+    }
+}
+
+pub fn config_cmd(key: &str, value: Option<&str>) {
+    let config = crate::config::Config::load();
+    if let Some(val) = value {
+        let mut config = config;
+        match key {
+            "dashboard_port" => {
+                config.dashboard_port = val.parse().expect("Invalid port number");
+            }
+            "scan_interval" => {
+                config.scan_interval_secs = val.parse().expect("Invalid interval");
+            }
+            "log_level" => {
+                config.log_level = val.to_string();
+            }
+            _ => {
+                eprintln!("Unknown config key: {}", key);
+                return;
+            }
+        }
+        config.save();
+        println!("Set {} = {}", key, val);
+    } else {
+        match key {
+            "dashboard_port" => println!("{}", config.dashboard_port),
+            "scan_interval" => println!("{}", config.scan_interval_secs),
+            "log_level" => println!("{}", config.log_level),
+            _ => eprintln!("Unknown config key: {}", key),
+        }
+    }
+}
+
+pub async fn logs() {
+    let log_path = crate::config::log_file_path();
+    if !log_path.exists() {
+        eprintln!("No log file found at {}", log_path.display());
+        return;
+    }
+    let output = tokio::process::Command::new("tail")
+        .args(["-f", &log_path.to_string_lossy()])
+        .status()
+        .await;
+    if let Err(e) = output {
+        eprintln!("Failed to tail logs: {}", e);
+    }
+}
+
+pub async fn mcp(args: &Cli) {
+    let api_url = format!("http://{}:{}", args.bind, args.port);
+    crate::mcp::run(api_url).await;
+}
+
+pub fn install_service() {
+    crate::service::install();
+}
+
+fn format_uptime(seconds: u64) -> String {
+    if seconds < 60 {
+        format!("{}s", seconds)
+    } else if seconds < 3600 {
+        format!("{}m", seconds / 60)
+    } else {
+        let h = seconds / 3600;
+        let m = (seconds % 3600) / 60;
+        format!("{}h {}m", h, m)
+    }
+}
