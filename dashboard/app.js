@@ -16,9 +16,10 @@ let projects = [];
 let envSecrets = [];
 // storeSecrets: [{key, projectName: string|null}]
 let storeSecrets = [];
-let revealedSecrets = {};      // "key@scope" → plaintext value
-let editingSecret = null;      // "key@scope" currently being edited
+let revealedSecrets = {};       // "key@scope" → plaintext value
+let editingSecret = null;       // "key@scope" currently being edited
 let collapsedProjects = new Set(); // project names collapsed in secrets panel
+let dismissedDuplicates = new Set(); // keys user dismissed from duplicate suggestions
 let filter = '';
 let ws = null;
 let connected = false;
@@ -167,7 +168,6 @@ function secretsSection() {
 
   const globalStore = storeSecrets.filter(s => !s.projectName);
   const hasEnv = envSecrets.length > 0;
-  const hasProjectStore = storeSecrets.some(s => s.projectName);
 
   if (!hasEnv && storeSecrets.length === 0) {
     html += `<div class="secrets-empty">No secrets found. Start a project with a .env file or add one to the store.</div>`;
@@ -190,6 +190,37 @@ function secretsSection() {
           </div>
         </div>`;
     });
+  }
+
+  // ── Duplicate key suggestions ─────────────────────────────────────────────
+  const globalKeySet = new Set(globalStore.map(s => s.key));
+  const duplicates = findDuplicateKeys().filter(
+    ({ key }) => !dismissedDuplicates.has(key) && !globalKeySet.has(key)
+  );
+  if (duplicates.length > 0) {
+    html += `<div class="duplicates-banner">
+      <span class="duplicates-title">⚡ ${duplicates.length} key${duplicates.length > 1 ? 's' : ''} shared across projects — promote to global?</span>
+      <div class="duplicates-list">`;
+    duplicates.forEach(({ key, occurrences }) => {
+      const names = occurrences.map(o => esc(o.projectName)).join(', ');
+      const allSame = occurrences.every(o => o.value === occurrences[0].value);
+      const valueHint = allSame ? '' : ` <span class="duplicates-differ">(values differ)</span>`;
+      // Encode value for safe inline use — only promote if all same, otherwise user picks
+      const safeVal = allSame ? encodeURIComponent(occurrences[0].value) : '';
+      html += `
+        <div class="duplicate-row">
+          <span class="secret-key">${esc(key)}</span>
+          <span class="duplicates-projects">${names}${valueHint}</span>
+          <div class="secret-actions">
+            ${allSame
+              ? `<button class="set-btn" onclick="window._promoteToGlobal('${esc(key)}','${safeVal}')">Add to global</button>`
+              : `<button class="set-btn" onclick="window._promoteToGlobalPick('${esc(key)}')">Add to global…</button>`
+            }
+            <button class="reveal-btn" onclick="window._dismissDuplicate('${esc(key)}')">Dismiss</button>
+          </div>
+        </div>`;
+    });
+    html += `</div></div>`;
   }
 
   // ── Per-project sections — each collapsible ────────────────────────────────
@@ -264,6 +295,22 @@ function _refreshSecretsPanel() {
   if (panel) panel.innerHTML = secretsSection();
 }
 
+// Returns [{key, occurrences: [{projectName, value}]}] for keys in 2+ projects.
+function findDuplicateKeys() {
+  // Gather all project-scoped keys with values (env files only — store values need a fetch)
+  const byKey = {};
+  envSecrets.forEach(({ key, value, projectName }) => {
+    if (!byKey[key]) byKey[key] = [];
+    // Avoid listing the same project twice if multiple .env* files share a key
+    if (!byKey[key].find(o => o.projectName === projectName)) {
+      byKey[key].push({ projectName, value });
+    }
+  });
+  return Object.entries(byKey)
+    .filter(([, occ]) => occ.length >= 2)
+    .map(([key, occurrences]) => ({ key, occurrences }));
+}
+
 async function loadSecrets() {
   try {
     // Load env file secrets for every project in parallel
@@ -288,6 +335,13 @@ async function loadSecrets() {
       ...globalKeys.map(k => ({ key: k, projectName: null })),
       ...storePerProject.flat(),
     ];
+
+    // Default-collapse all project sections
+    const projectNames = [...new Set([
+      ...envSecrets.map(s => s.projectName),
+      ...storeSecrets.filter(s => s.projectName).map(s => s.projectName),
+    ])];
+    projectNames.forEach(n => collapsedProjects.add(n));
 
     _refreshSecretsPanel();
   } catch (_) {
@@ -356,6 +410,46 @@ window._restart = async (id, name) => {
 
 window._openInBrowser = (port) => {
   window.open(`http://localhost:${port}`, '_blank');
+};
+
+window._dismissDuplicate = (key) => {
+  dismissedDuplicates.add(key);
+  _refreshSecretsPanel();
+};
+
+window._promoteToGlobal = async (key, encodedVal) => {
+  const value = decodeURIComponent(encodedVal);
+  const resp = await fetch('/secrets', {
+    method: 'POST',
+    headers: { 'Content-Type': 'application/json' },
+    body: JSON.stringify({ key, value }),
+  });
+  if (resp.ok) {
+    dismissedDuplicates.add(key);
+    showToast(`${key} added to global store`, 'success');
+    await loadSecrets();
+  } else {
+    showToast(`Failed to promote ${key}`, 'error');
+  }
+};
+
+// "values differ" case — show a picker inline via a small modal-free form
+window._promoteToGlobalPick = (key) => {
+  const dups = findDuplicateKeys().find(d => d.key === key);
+  if (!dups) return;
+  // Build a tiny inline picker inside the duplicate row
+  const row = [...document.querySelectorAll('.duplicate-row')]
+    .find(el => el.querySelector('.secret-key')?.textContent === key);
+  if (!row) return;
+  const actions = row.querySelector('.secret-actions');
+  actions.innerHTML = dups.occurrences.map(({ projectName, value }) =>
+    `<button class="set-btn" style="max-width:140px;overflow:hidden;text-overflow:ellipsis"
+       title="${esc(projectName)}: ${esc(value)}"
+       onclick="window._promoteToGlobal('${esc(key)}','${encodeURIComponent(value)}')">
+       ${esc(projectName)}
+     </button>`
+  ).join('') +
+  `<button class="reveal-btn" onclick="window._dismissDuplicate('${esc(key)}')">Dismiss</button>`;
 };
 
 window._toggleProjectSecrets = (projectName) => {

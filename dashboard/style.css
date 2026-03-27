@@ -547,6 +547,40 @@ body {
 .delete-secret-btn { color: var(--accent-danger); border-color: var(--accent-danger-dim); }
 .delete-secret-btn:hover { background: var(--accent-danger); color: #fff; border-color: var(--accent-danger); }
 
+/* ─── Duplicate key suggestions ─────────────────────────────────────────── */
+.duplicates-banner {
+  background: var(--bg-primary);
+  border-bottom: 1px solid var(--border);
+  padding: 8px 16px 4px;
+}
+.duplicates-title {
+  display: block;
+  font-family: var(--font-mono);
+  font-size: 10px;
+  font-weight: 600;
+  text-transform: uppercase;
+  letter-spacing: .08em;
+  color: var(--accent-warning);
+  margin-bottom: 6px;
+}
+.duplicates-list { display: flex; flex-direction: column; gap: 2px; }
+.duplicate-row {
+  display: flex;
+  align-items: center;
+  gap: 10px;
+  padding: 4px 0;
+}
+.duplicates-projects {
+  font-family: var(--font-mono);
+  font-size: 11px;
+  color: var(--text-muted);
+  flex: 1;
+}
+.duplicates-differ {
+  color: var(--accent-warning);
+  font-size: 10px;
+}
+
 .secrets-empty {
   padding: 20px 16px;
   font-family: var(--font-mono);
