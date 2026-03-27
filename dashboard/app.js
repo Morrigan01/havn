@@ -35,7 +35,6 @@ const $ = (sel) => document.querySelector(sel);
 const app = () => $('#app');
 
 function render() {
-  // Consume any buffered pending state — render IS the flush.
   pendingCount = 0;
   clearTimeout(pendingTimer);
 
@@ -47,100 +46,104 @@ function render() {
 
   const identified = filtered.filter(p => p.framework || p.path);
   const unresolved = filtered.filter(p => !p.framework && !p.path);
-
-  const projectCount = projects.length;
+  const running = projects.filter(p => p.ports.length > 0).length;
   const portCount = projects.reduce((sum, p) => sum + p.ports.length, 0);
   const scanAgo = lastScan ? timeSince(lastScan) : '...';
   const scanStale = lastScan && (Date.now() - lastScan) > 15000;
 
   let html = `
     ${!connected ? '<div class="banner warning">Connection lost. Reconnecting...</div>' : ''}
-    <div class="header">
-      <h1>scanprojects</h1>
-      <div class="stats">
-        ${projectCount} project${projectCount !== 1 ? 's' : ''} &middot;
-        ${portCount} port${portCount !== 1 ? 's' : ''} &middot;
-        <span class="live-dot"></span>scanned <span id="scan-time" class="${scanStale ? 'stale' : ''}">${scanAgo}</span>
-      </div>
-    </div>
-    <div class="search">
-      <input type="text" placeholder="Filter by name, framework, or port..."
-             value="${filter}" oninput="window._filter(this.value)"
-             aria-label="Filter projects">
-    </div>`;
+    <div class="layout">
+      <aside class="rail">
+        <div class="rail-brand">scanprojects</div>
+        <div class="rail-stats">
+          <div class="rail-stat-block">
+            <span class="rail-count">${String(running).padStart(2, '0')}</span>
+            <span class="rail-label">running</span>
+          </div>
+          <div class="rail-stat-block">
+            <span class="rail-count">${String(portCount).padStart(2, '0')}</span>
+            <span class="rail-label">ports</span>
+          </div>
+        </div>
+        <div class="rail-scan">
+          <span class="live-dot"></span>
+          <span id="scan-time" class="${scanStale ? 'stale' : ''}">${scanAgo}</span>
+        </div>
+        <div class="rail-search">
+          <input type="text" placeholder="Filter…" value="${filter}"
+                 oninput="window._filter(this.value)" aria-label="Filter projects">
+        </div>
+      </aside>
+      <main class="board">`;
 
   if (projects.length === 0 && connected) {
     html += `
       <div class="empty-state">
         <h2>No projects detected</h2>
-        <p>Start a dev server in another terminal and it will appear here automatically.</p>
+        <p>Start a dev server in another terminal.</p>
         <code>$ npm run dev</code>
         <code>$ cargo run</code>
         <code>$ python manage.py runserver</code>
       </div>`;
+  } else if (!connected && projects.length === 0) {
+    html += `
+      <div class="skeleton-row"><div class="skeleton" style="width:160px;height:15px"></div><div class="skeleton" style="width:48px;height:20px"></div><div class="skeleton" style="width:60px;height:13px"></div></div>
+      <div class="skeleton-row"><div class="skeleton" style="width:120px;height:15px"></div><div class="skeleton" style="width:48px;height:20px"></div><div class="skeleton" style="width:60px;height:13px"></div></div>
+      <div class="skeleton-row"><div class="skeleton" style="width:140px;height:15px"></div><div class="skeleton" style="width:48px;height:20px"></div><div class="skeleton" style="width:60px;height:13px"></div></div>`;
   } else {
-    if (!connected && projects.length === 0) {
-      html += `
-        <div class="skeleton-row"><div class="skeleton" style="width:24px;height:16px"></div><div class="skeleton" style="width:160px;height:16px"></div><div class="skeleton" style="width:48px;height:20px"></div><div class="skeleton" style="width:60px;height:16px"></div></div>
-        <div class="skeleton-row"><div class="skeleton" style="width:24px;height:16px"></div><div class="skeleton" style="width:120px;height:16px"></div><div class="skeleton" style="width:48px;height:20px"></div><div class="skeleton" style="width:60px;height:16px"></div></div>
-        <div class="skeleton-row"><div class="skeleton" style="width:24px;height:16px"></div><div class="skeleton" style="width:140px;height:16px"></div><div class="skeleton" style="width:48px;height:20px"></div><div class="skeleton" style="width:60px;height:16px"></div></div>`;
-    }
-
-    if (identified.length > 0) {
-      html += '<div class="project-list" role="grid">';
-      identified.forEach((p, i) => { html += projectRow(p, i); });
-      html += '</div>';
-    }
-
+    identified.forEach((p, i) => { html += projectCard(p, i); });
     if (unresolved.length > 0) {
-      html += '<div class="section-label">Unresolved Ports</div>';
-      html += '<div class="project-list unresolved" role="grid">';
-      unresolved.forEach((p, i) => { html += projectRow(p, identified.length + i); });
-      html += '</div>';
+      html += `<div class="section-label" style="margin-top:16px">Unresolved Ports</div>`;
+      unresolved.forEach((p, i) => { html += projectCard(p, identified.length + i, true); });
     }
   }
 
-  // Secrets panel — populated async after render
-  html += `<div id="secrets-panel">${secretsSection()}</div>`;
+  html += `
+        <div id="secrets-panel">${secretsSection()}</div>
+      </main>
+    </div>`;
 
-  // Toasts
-  toasts.forEach(t => {
-    html += `<div class="toast ${t.type}">${t.message}</div>`;
-  });
+  toasts.forEach(t => { html += `<div class="toast ${t.type}">${t.message}</div>`; });
 
   app().innerHTML = html;
 }
 
-function projectRow(p, index) {
+function projectCard(p, index, dim = false) {
   const fw = p.framework || '?';
   const color = FRAMEWORK_COLORS[fw] || '#888888';
   const label = FRAMEWORK_LABELS[fw] || '?';
   const ports = p.ports.map(port => `:${port}`).join(' ');
   const uptime = formatUptime(p.uptime_seconds || 0);
-  const delay = index * 50;
-
-  // Dark mode needs light text on dark badge colors
   const textColor = isLightColor(color) ? '#000' : '#fff';
+  const delay = index * 40;
 
   return `
-    <div class="project-row" role="row" style="animation-delay:${delay}ms"
-         tabindex="0" aria-label="${p.name} on ${ports}">
-      <button class="fav-btn ${p.favorite ? 'active' : ''}"
-              onclick="window._toggleFav(${p.id})"
-              aria-label="${p.favorite ? 'Unfavorite' : 'Favorite'} ${p.name}">
-        ${p.favorite ? '★' : '☆'}
-      </button>
-      <span class="project-name">${esc(p.name)}</span>
-      <span class="badge" style="background:${color};color:${textColor}">${label}</span>
-      <span class="ports">${ports || '-'}</span>
-      <span class="uptime">${uptime}</span>
-      <div class="actions">
-        ${p.ports.length > 0 ? `<button class="open-btn" onclick="window._openInBrowser(${p.ports[0]})" aria-label="Open in browser">Open</button>` : ''}
-        ${p.start_cmd ? `<button class="restart-btn" onclick="window._restart(${p.id}, '${esc(p.name)}')" aria-label="Restart ${esc(p.name)}">Restart</button>` : ''}
-        <button class="kill-btn" onclick="window._kill(${p.id}, '${esc(p.name)}')"
-                aria-label="Kill ${esc(p.name)}">Kill</button>
+    <div class="card ${dim ? 'card-dim' : ''}" style="animation-delay:${delay}ms"
+         tabindex="0" aria-label="${p.name}${ports ? ' on ' + ports : ''}">
+      <div class="card-top">
+        <button class="fav-btn ${p.favorite ? 'active' : ''}" onclick="window._toggleFav(${p.id})"
+                aria-label="${p.favorite ? 'Unfavorite' : 'Favorite'} ${p.name}">
+          ${p.favorite ? '★' : '☆'}
+        </button>
+        <span class="project-name">${esc(p.name)}</span>
+        <span class="badge" style="background:${color};color:${textColor}">${label}</span>
       </div>
-      ${p.start_cmd ? `<div class="start-cmd">$ ${esc(p.start_cmd)}</div>` : ''}
+      <div class="card-bottom">
+        <span class="ports">${ports || '—'}</span>
+        <span class="uptime">${uptime}</span>
+        ${p.start_cmd ? `<span class="start-cmd">$ ${esc(p.start_cmd)}</span>` : ''}
+        <div class="card-actions">
+          ${p.ports.length > 0 ? `<button class="open-btn" onclick="window._openInBrowser(${p.ports[0]})">Open</button>` : ''}
+          ${p.start_cmd ? `<button class="restart-btn" onclick="window._restart(${p.id},'${esc(p.name)}')">Restart</button>` : ''}
+          <button class="kill-hold-btn"
+            onmousedown="window._startKillHold(this,${p.id},'${esc(p.name)}')"
+            onmouseup="window._cancelKillHold(this)"
+            onmouseleave="window._cancelKillHold(this)"
+            ontouchstart="window._startKillHold(this,${p.id},'${esc(p.name)}')"
+            ontouchend="window._cancelKillHold(this)">Kill</button>
+        </div>
+      </div>
     </div>`;
 }
 
@@ -361,32 +364,40 @@ window._toggleFav = async (id) => {
   });
 };
 
-window._kill = async (id, name) => {
-  const btn = event.target;
-  btn.disabled = true;
-  btn.textContent = 'Killing...';
-  try {
-    const resp = await fetch(`/projects/${id}/kill`, { method: 'POST' });
-    if (resp.ok) {
-      showToast(`Killed: ${name}`, 'success');
-      const p = projects.find(p => p.id === id);
-      if (p) { p.ports = []; p.pids = []; }
-      render();
-    } else {
-      const data = await resp.json().catch(() => ({}));
-      showToast(`Kill failed: ${data.message || 'Unknown error'}`, 'error');
-      btn.disabled = false;
+// Hold-to-kill: 600 ms hold gesture, progress bar fills, then fires.
+let _killHoldTimer = null;
+
+window._startKillHold = (btn, id, name) => {
+  btn.classList.add('holding');
+  _killHoldTimer = setTimeout(async () => {
+    btn.classList.remove('holding');
+    btn.classList.add('killing');
+    btn.textContent = '…';
+    try {
+      const resp = await fetch(`/projects/${id}/kill`, { method: 'POST' });
+      if (resp.ok) {
+        const p = projects.find(p => p.id === id);
+        if (p) { p.ports = []; p.pids = []; }
+        render();
+      } else {
+        showToast(`Kill failed`, 'error');
+        btn.classList.remove('killing');
+        btn.textContent = 'Kill';
+      }
+    } catch (e) {
+      showToast(`Kill failed: ${e.message}`, 'error');
+      btn.classList.remove('killing');
       btn.textContent = 'Kill';
     }
-  } catch (e) {
-    showToast(`Kill failed: ${e.message}`, 'error');
-    btn.disabled = false;
-    btn.textContent = 'Kill';
-  }
+  }, 600);
 };
 
-window._restart = async (id, name) => {
-  const btn = event.target;
+window._cancelKillHold = (btn) => {
+  clearTimeout(_killHoldTimer);
+  btn.classList.remove('holding');
+};
+
+window._restart = async (id, name, btn = event.target) => {
   btn.disabled = true;
   btn.textContent = 'Restarting...';
   try {
@@ -602,16 +613,16 @@ function deferRender() {
 function _injectOrUpdateBadge() {
   let badge = document.getElementById('update-badge');
   if (!badge) {
-    const header = document.querySelector('.header');
-    if (!header) return;
+    const rail = document.querySelector('.rail-search');
+    if (!rail) return;
     badge = document.createElement('button');
     badge.id = 'update-badge';
     badge.className = 'update-badge';
     badge.title = 'Updates ready — click to apply';
     badge.onclick = window._flushPending;
-    header.appendChild(badge);
+    rail.appendChild(badge);
   }
-  badge.textContent = pendingCount > 1 ? `↻ ${pendingCount}` : '↻';
+  badge.textContent = pendingCount > 1 ? `↻ ${pendingCount} updates` : '↻ update';
 }
 
 // WebSocket
