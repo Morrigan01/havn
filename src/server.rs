@@ -37,6 +37,7 @@ pub async fn run(bind: String, port: u16) {
         .route("/projects", post(api::add_project))
         .route("/projects/{id}/kill", post(api::kill_project))
         .route("/projects/{id}/restart", post(api::restart_project))
+        .route("/projects/{id}/processes/{pid}/restart", post(api::restart_process))
         .route("/projects/{id}", patch(api::patch_project))
         .route("/projects/{id}", delete(api::delete_project))
         .route("/ports", get(api::get_ports))

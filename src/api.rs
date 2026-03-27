@@ -278,6 +278,104 @@ pub async fn restart_project(
     }
 }
 
+/// Restart a single process (identified by PID) within a multi-process project.
+/// Kills only that PID, then re-spawns the project's start_cmd.
+pub async fn restart_process(
+    State(state): State<AppState>,
+    Path((id, pid)): Path<(i64, u32)>,
+) -> Result<Json<KillResult>, (StatusCode, Json<KillResult>)> {
+    let project = state.registry.get_project(id).ok_or((
+        StatusCode::NOT_FOUND,
+        Json(KillResult {
+            status: "error".to_string(),
+            message: "Project not found".to_string(),
+        }),
+    ))?;
+
+    if !project.pids.contains(&pid) {
+        return Err((
+            StatusCode::NOT_FOUND,
+            Json(KillResult {
+                status: "error".to_string(),
+                message: format!("PID {} not found in project '{}'", pid, project.name),
+            }),
+        ));
+    }
+
+    let start_cmd = project.start_cmd.clone().ok_or((
+        StatusCode::UNPROCESSABLE_ENTITY,
+        Json(KillResult {
+            status: "error".to_string(),
+            message: format!(
+                "No start command configured for '{}'. Set one with: scanprojects set-start-cmd {} \"<cmd>\"",
+                project.name, project.name
+            ),
+        }),
+    ))?;
+
+    let our_pid = std::process::id();
+    let name = project.name.clone();
+    let path = project.path.clone();
+
+    if pid == our_pid {
+        // Self-restart: use detached shell (same as restart_project self-restart logic).
+        let shell_cmd = format!(
+            "(sleep 0.3; kill -TERM {pid} 2>/dev/null; sleep 0.4; kill -KILL {pid} 2>/dev/null; sleep 0.4; cd '{dir}' && {cmd}) &",
+            pid = pid,
+            dir = path.replace('\'', "'\\''"),
+            cmd = start_cmd.replace('\'', "'\\''"),
+        );
+        std::process::Command::new("sh")
+            .arg("-c").arg(&shell_cmd)
+            .stdin(std::process::Stdio::null())
+            .stdout(std::process::Stdio::null())
+            .stderr(std::process::Stdio::null())
+            .spawn().ok();
+        return Ok(Json(KillResult {
+            status: "success".to_string(),
+            message: format!("Restarted process {} in '{}'", pid, name),
+        }));
+    }
+
+    // Kill only the specific PID.
+    kill_pid(pid, &path).ok();
+    tokio::time::sleep(std::time::Duration::from_millis(500)).await;
+
+    // Collect secrets and spawn.
+    let global_secrets = state.secrets.get_all(crate::secrets::GLOBAL);
+    let project_secrets = state.secrets.get_all(id);
+    let mut env_vars: std::collections::HashMap<String, String> =
+        global_secrets.into_iter().collect();
+    env_vars.extend(project_secrets);
+
+    let mut cmd = tokio::process::Command::new("sh");
+    cmd.arg("-c").arg(&start_cmd)
+        .current_dir(&path)
+        .stdin(std::process::Stdio::null())
+        .stdout(std::process::Stdio::null())
+        .stderr(std::process::Stdio::null());
+    for (k, v) in &env_vars {
+        cmd.env(k, v);
+    }
+
+    match cmd.spawn() {
+        Ok(_) => {
+            tracing::info!("Restarted process {} in '{}' via: {}", pid, name, start_cmd);
+            Ok(Json(KillResult {
+                status: "success".to_string(),
+                message: format!("Restarted process {} in '{}'", pid, name),
+            }))
+        }
+        Err(e) => Err((
+            StatusCode::INTERNAL_SERVER_ERROR,
+            Json(KillResult {
+                status: "error".to_string(),
+                message: format!("Failed to spawn '{}': {}", start_cmd, e),
+            }),
+        )),
+    }
+}
+
 pub async fn add_project(
     State(state): State<AppState>,
     Json(body): Json<AddProject>,

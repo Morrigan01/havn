@@ -198,19 +198,43 @@ function projectCard(p, index, dim = false) {
         <span class="badge" style="background:${color};color:${textColor}">${label}</span>
       </div>
       <div class="card-bottom">
-        <span class="ports">${ports || '—'}</span>
-        <span class="uptime">${uptime}</span>
         ${p.start_cmd ? `<span class="start-cmd">$ ${esc(p.start_cmd)}</span>` : ''}
-        <div class="card-actions">
-          ${p.ports.length > 0 ? `<button class="open-btn" onclick="window._openInBrowser(${p.ports[0]})">Open</button>` : ''}
-          ${p.start_cmd ? `<button class="restart-btn" ${isRestarting ? 'disabled' : ''} onclick="window._restart(${p.id},'${esc(p.name)}')">${isRestarting ? 'Restarting…' : 'Restart'}</button>` : ''}
-          <button class="kill-hold-btn" ${isRestarting ? 'disabled' : ''}
-            onmousedown="window._startKillHold(this,${p.id},'${esc(p.name)}')"
-            onmouseup="window._cancelKillHold(this)"
-            onmouseleave="window._cancelKillHold(this)"
-            ontouchstart="window._startKillHold(this,${p.id},'${esc(p.name)}')"
-            ontouchend="window._cancelKillHold(this)">Kill</button>
-        </div>
+        ${p.ports.length > 1
+          ? /* multi-process: one row per port/pid */
+            p.ports.map((port, i) => {
+              const pid = p.pids[i];
+              const isRowRestarting = restartingProjects.has(`${p.id}:${pid}`);
+              return `<div class="process-row">
+                <span class="ports">:${port}</span>
+                <span class="uptime">${uptime}</span>
+                <div class="card-actions">
+                  <button class="open-btn" onclick="window._openInBrowser(${port})">Open</button>
+                  ${p.start_cmd ? `<button class="restart-btn" ${isRowRestarting ? 'disabled' : ''} onclick="window._restartProcess(${p.id},${pid},'${esc(p.name)}',${port})">${isRowRestarting ? 'Restarting…' : 'Restart'}</button>` : ''}
+                  <button class="kill-hold-btn" ${isRowRestarting ? 'disabled' : ''}
+                    onmousedown="window._startKillHold(this,${p.id},'${esc(p.name)}',${pid})"
+                    onmouseup="window._cancelKillHold(this)"
+                    onmouseleave="window._cancelKillHold(this)"
+                    ontouchstart="window._startKillHold(this,${p.id},'${esc(p.name)}',${pid})"
+                    ontouchend="window._cancelKillHold(this)">Kill</button>
+                </div>
+              </div>`;
+            }).join('')
+          : /* single process: original layout */
+            `<div class="process-row">
+              <span class="ports">${ports || '—'}</span>
+              <span class="uptime">${uptime}</span>
+              <div class="card-actions">
+                ${p.ports.length > 0 ? `<button class="open-btn" onclick="window._openInBrowser(${p.ports[0]})">Open</button>` : ''}
+                ${p.start_cmd ? `<button class="restart-btn" ${isRestarting ? 'disabled' : ''} onclick="window._restart(${p.id},'${esc(p.name)}')">${isRestarting ? 'Restarting…' : 'Restart'}</button>` : ''}
+                <button class="kill-hold-btn" ${isRestarting ? 'disabled' : ''}
+                  onmousedown="window._startKillHold(this,${p.id},'${esc(p.name)}')"
+                  onmouseup="window._cancelKillHold(this)"
+                  onmouseleave="window._cancelKillHold(this)"
+                  ontouchstart="window._startKillHold(this,${p.id},'${esc(p.name)}')"
+                  ontouchend="window._cancelKillHold(this)">Kill</button>
+              </div>
+            </div>`
+        }
       </div>
     </div>`;
 }
@@ -443,17 +467,36 @@ window._toggleFav = async (id) => {
 // Hold-to-kill: 600 ms hold gesture, progress bar fills, then fires.
 let _killHoldTimer = null;
 
-window._startKillHold = (btn, id, name) => {
+// pid is optional — if provided, kills only that process; otherwise kills all project processes.
+window._startKillHold = (btn, id, name, pid = null) => {
   btn.classList.add('holding');
   _killHoldTimer = setTimeout(async () => {
     btn.classList.remove('holding');
     btn.classList.add('killing');
     btn.textContent = '…';
     try {
-      const resp = await fetch(`/projects/${id}/kill`, { method: 'POST' });
+      const url = pid != null
+        ? `/projects/${id}/processes/${pid}/restart` // kill-only via a dedicated kill endpoint would be ideal,
+        : `/projects/${id}/kill`;                    // but for now we use the existing kill-all or kill-port
+      // For per-pid kill, use the kill-port approach via the port number
+      const killUrl = pid != null
+        ? (() => {
+            const p = projects.find(p => p.id === id);
+            const idx = p ? p.pids.indexOf(pid) : -1;
+            return idx >= 0 ? `/kill/${p.ports[idx]}` : `/projects/${id}/kill`;
+          })()
+        : `/projects/${id}/kill`;
+      const resp = await fetch(killUrl, { method: 'POST' });
       if (resp.ok) {
         const p = projects.find(p => p.id === id);
-        if (p) { p.ports = []; p.pids = []; }
+        if (p) {
+          if (pid != null) {
+            const idx = p.pids.indexOf(pid);
+            if (idx >= 0) { p.pids.splice(idx, 1); p.ports.splice(idx, 1); }
+          } else {
+            p.ports = []; p.pids = [];
+          }
+        }
         render();
       } else {
         showToast(`Kill failed`, 'error');
@@ -519,6 +562,58 @@ window._restart = async (id, name) => {
     setTimeout(poll, 1000);
   };
   setTimeout(poll, 1500); // give the process a moment to spawn
+};
+
+// Restart a single process (one port/pid within a multi-process project).
+window._restartProcess = async (id, pid, name, port) => {
+  const key = `${id}:${pid}`;
+  restartingProjects.add(key);
+  render();
+  try {
+    const resp = await fetch(`/projects/${id}/processes/${pid}/restart`, { method: 'POST' });
+    if (!resp.ok) {
+      const data = await resp.json().catch(() => ({}));
+      showToast(`Restart failed: ${data.message || 'No start command configured'}`, 'error');
+      restartingProjects.delete(key);
+      render();
+      return;
+    }
+  } catch (e) {
+    showToast(`Restart failed: ${e.message || 'Server unreachable'}`, 'error');
+    restartingProjects.delete(key);
+    render();
+    return;
+  }
+
+  // Poll until this port comes back with a new PID.
+  const deadline = Date.now() + 15000;
+  const poll = async () => {
+    if (Date.now() > deadline) {
+      showToast(`:${port} restart timed out`, 'error');
+      restartingProjects.delete(key);
+      render();
+      return;
+    }
+    try {
+      const r = await fetch('/projects');
+      if (r.ok) {
+        const updated = await r.json();
+        const proj = updated.find(p => p.id === id);
+        if (proj) {
+          const idx = proj.ports.indexOf(port);
+          if (idx >= 0 && proj.pids[idx] !== pid) {
+            projects = updated;
+            restartingProjects.delete(key);
+            showToast(`:${port} is back online`, 'success');
+            render();
+            return;
+          }
+        }
+      }
+    } catch (_) {}
+    setTimeout(poll, 1000);
+  };
+  setTimeout(poll, 1500);
 };
 
 window._openInBrowser = (port) => {
