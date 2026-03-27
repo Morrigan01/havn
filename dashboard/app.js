@@ -195,27 +195,24 @@ function secretsSection() {
   // ── Duplicate key suggestions ─────────────────────────────────────────────
   const globalKeySet = new Set(globalStore.map(s => s.key));
   const duplicates = findDuplicateKeys().filter(
-    ({ key }) => !dismissedDuplicates.has(key) && !globalKeySet.has(key)
+    ({ key, occurrences }) =>
+      !dismissedDuplicates.has(key) &&
+      !globalKeySet.has(key) &&
+      occurrences.every(o => o.value === occurrences[0].value)
   );
   if (duplicates.length > 0) {
     html += `<div class="duplicates-banner">
-      <span class="duplicates-title">⚡ ${duplicates.length} key${duplicates.length > 1 ? 's' : ''} shared across projects — promote to global?</span>
+      <span class="duplicates-title">⚡ ${duplicates.length} key${duplicates.length > 1 ? 's' : ''} with identical values across projects — promote to global?</span>
       <div class="duplicates-list">`;
     duplicates.forEach(({ key, occurrences }) => {
       const names = occurrences.map(o => esc(o.projectName)).join(', ');
-      const allSame = occurrences.every(o => o.value === occurrences[0].value);
-      const valueHint = allSame ? '' : ` <span class="duplicates-differ">(values differ)</span>`;
-      // Encode value for safe inline use — only promote if all same, otherwise user picks
-      const safeVal = allSame ? encodeURIComponent(occurrences[0].value) : '';
+      const safeVal = encodeURIComponent(occurrences[0].value);
       html += `
         <div class="duplicate-row">
           <span class="secret-key">${esc(key)}</span>
-          <span class="duplicates-projects">${names}${valueHint}</span>
+          <span class="duplicates-projects">${names}</span>
           <div class="secret-actions">
-            ${allSame
-              ? `<button class="set-btn" onclick="window._promoteToGlobal('${esc(key)}','${safeVal}')">Add to global</button>`
-              : `<button class="set-btn" onclick="window._promoteToGlobalPick('${esc(key)}')">Add to global…</button>`
-            }
+            <button class="set-btn" onclick="window._promoteToGlobal('${esc(key)}','${safeVal}')">Add to global</button>
             <button class="reveal-btn" onclick="window._dismissDuplicate('${esc(key)}')">Dismiss</button>
           </div>
         </div>`;
@@ -431,25 +428,6 @@ window._promoteToGlobal = async (key, encodedVal) => {
   } else {
     showToast(`Failed to promote ${key}`, 'error');
   }
-};
-
-// "values differ" case — show a picker inline via a small modal-free form
-window._promoteToGlobalPick = (key) => {
-  const dups = findDuplicateKeys().find(d => d.key === key);
-  if (!dups) return;
-  // Build a tiny inline picker inside the duplicate row
-  const row = [...document.querySelectorAll('.duplicate-row')]
-    .find(el => el.querySelector('.secret-key')?.textContent === key);
-  if (!row) return;
-  const actions = row.querySelector('.secret-actions');
-  actions.innerHTML = dups.occurrences.map(({ projectName, value }) =>
-    `<button class="set-btn" style="max-width:140px;overflow:hidden;text-overflow:ellipsis"
-       title="${esc(projectName)}: ${esc(value)}"
-       onclick="window._promoteToGlobal('${esc(key)}','${encodeURIComponent(value)}')">
-       ${esc(projectName)}
-     </button>`
-  ).join('') +
-  `<button class="reveal-btn" onclick="window._dismissDuplicate('${esc(key)}')">Dismiss</button>`;
 };
 
 window._toggleProjectSecrets = (projectName) => {

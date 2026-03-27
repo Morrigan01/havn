@@ -576,10 +576,6 @@ body {
   color: var(--text-muted);
   flex: 1;
 }
-.duplicates-differ {
-  color: var(--accent-warning);
-  font-size: 10px;
-}
 
 .secrets-empty {
   padding: 20px 16px;
