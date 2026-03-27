@@ -48,6 +48,59 @@ pub enum Command {
     Mcp,
     /// Install as a system service (launchd/systemd)
     InstallService,
+    /// Kill and restart a project using its configured start command
+    Restart {
+        /// Project name or path
+        target: String,
+    },
+    /// Set the start command for a project (used by `restart`)
+    SetStartCmd {
+        /// Project name or path
+        project: String,
+        /// Shell command to start the project, e.g. "npm run dev"
+        cmd: String,
+    },
+    /// Manage encrypted local secrets
+    Secret {
+        #[command(subcommand)]
+        action: SecretAction,
+    },
+}
+
+#[derive(Subcommand)]
+pub enum SecretAction {
+    /// Store an encrypted secret
+    Set {
+        /// Secret key
+        key: String,
+        /// Secret value
+        value: String,
+        /// Scope to a project (omit for global)
+        #[arg(short, long)]
+        project: Option<String>,
+    },
+    /// Retrieve a secret value
+    Get {
+        /// Secret key
+        key: String,
+        /// Project scope (omit for global)
+        #[arg(short, long)]
+        project: Option<String>,
+    },
+    /// List secret keys (values are not shown)
+    List {
+        /// Project scope (omit for global)
+        #[arg(short, long)]
+        project: Option<String>,
+    },
+    /// Delete a secret
+    Delete {
+        /// Secret key
+        key: String,
+        /// Project scope (omit for global)
+        #[arg(short, long)]
+        project: Option<String>,
+    },
 }
 
 pub async fn status(args: &Cli) {
@@ -259,6 +312,149 @@ pub async fn mcp(args: &Cli) {
 
 pub fn install_service() {
     crate::service::install();
+}
+
+pub async fn restart(args: &Cli, target: &str) {
+    let projects_url = format!("http://{}:{}/projects", args.bind, args.port);
+    let resp = match reqwest::get(&projects_url).await {
+        Ok(r) => r,
+        Err(_) => {
+            eprintln!("Server not running. Start with `scanprojects` first.");
+            return;
+        }
+    };
+
+    let projects: Vec<crate::api::ProjectResponse> = match resp.json().await {
+        Ok(p) => p,
+        Err(_) => {
+            eprintln!("Failed to parse response.");
+            return;
+        }
+    };
+
+    let project = match projects.iter().find(|p| p.name == target || p.path == target) {
+        Some(p) => p,
+        None => {
+            eprintln!("Project '{}' not found.", target);
+            return;
+        }
+    };
+
+    let url = format!("http://{}:{}/projects/{}/restart", args.bind, args.port, project.id);
+    let client = reqwest::Client::new();
+    match client.post(&url).send().await {
+        Ok(resp) if resp.status().is_success() => {
+            println!("Restarting: {}", target);
+        }
+        Ok(resp) => {
+            let body = resp.json::<serde_json::Value>().await.unwrap_or_default();
+            eprintln!("Restart failed: {}", body.get("message").and_then(|m| m.as_str()).unwrap_or("unknown error"));
+        }
+        Err(e) => eprintln!("Error: {}", e),
+    }
+}
+
+pub async fn set_start_cmd(args: &Cli, project: &str, cmd: &str) {
+    let projects_url = format!("http://{}:{}/projects", args.bind, args.port);
+    let resp = match reqwest::get(&projects_url).await {
+        Ok(r) => r,
+        Err(_) => {
+            eprintln!("Server not running. Start with `scanprojects` first.");
+            return;
+        }
+    };
+
+    let projects: Vec<crate::api::ProjectResponse> = match resp.json().await {
+        Ok(p) => p,
+        Err(_) => {
+            eprintln!("Failed to parse response.");
+            return;
+        }
+    };
+
+    let found = match projects.iter().find(|p| p.name == project || p.path == project) {
+        Some(p) => p,
+        None => {
+            eprintln!("Project '{}' not found.", project);
+            return;
+        }
+    };
+
+    let url = format!("http://{}:{}/projects/{}", args.bind, args.port, found.id);
+    let client = reqwest::Client::new();
+    let body = serde_json::json!({ "start_cmd": cmd });
+    match client.patch(&url).json(&body).send().await {
+        Ok(resp) if resp.status().is_success() => {
+            println!("Set start command for '{}': {}", project, cmd);
+        }
+        _ => eprintln!("Failed to set start command."),
+    }
+}
+
+pub async fn secret(args: &Cli, action: &SecretAction) {
+    let base = format!("http://{}:{}", args.bind, args.port);
+    let client = reqwest::Client::new();
+
+    match action {
+        SecretAction::Set { key, value, project } => {
+            let mut body = serde_json::json!({ "key": key, "value": value });
+            if let Some(p) = project {
+                body["project"] = serde_json::json!(p);
+            }
+            match client.post(format!("{}/secrets", base)).json(&body).send().await {
+                Ok(r) if r.status().is_success() => println!("Secret '{}' stored.", key),
+                Ok(r) => eprintln!("Failed: {}", r.text().await.unwrap_or_default()),
+                Err(e) => eprintln!("Error: {}", e),
+            }
+        }
+        SecretAction::Get { key, project } => {
+            let mut url = format!("{}/secrets/{}", base, key);
+            if let Some(p) = project {
+                url = format!("{}?project={}", url, p);
+            }
+            match client.get(&url).send().await {
+                Ok(r) if r.status().is_success() => {
+                    let data: serde_json::Value = r.json().await.unwrap_or_default();
+                    println!("{}", data.get("value").and_then(|v| v.as_str()).unwrap_or(""));
+                }
+                Ok(r) if r.status() == 404 => eprintln!("Secret '{}' not found.", key),
+                Ok(r) => eprintln!("Failed: {}", r.text().await.unwrap_or_default()),
+                Err(e) => eprintln!("Error: {}", e),
+            }
+        }
+        SecretAction::List { project } => {
+            let mut url = format!("{}/secrets", base);
+            if let Some(p) = project {
+                url = format!("{}?project={}", url, p);
+            }
+            match client.get(&url).send().await {
+                Ok(r) if r.status().is_success() => {
+                    let keys: Vec<String> = r.json().await.unwrap_or_default();
+                    if keys.is_empty() {
+                        println!("No secrets stored.");
+                    } else {
+                        for k in &keys {
+                            println!("{}", k);
+                        }
+                    }
+                }
+                Ok(r) => eprintln!("Failed: {}", r.text().await.unwrap_or_default()),
+                Err(e) => eprintln!("Error: {}", e),
+            }
+        }
+        SecretAction::Delete { key, project } => {
+            let mut url = format!("{}/secrets/{}", base, key);
+            if let Some(p) = project {
+                url = format!("{}?project={}", url, p);
+            }
+            match client.delete(&url).send().await {
+                Ok(r) if r.status().is_success() => println!("Deleted secret '{}'.", key),
+                Ok(r) if r.status() == 404 => eprintln!("Secret '{}' not found.", key),
+                Ok(r) => eprintln!("Failed: {}", r.text().await.unwrap_or_default()),
+                Err(e) => eprintln!("Error: {}", e),
+            }
+        }
+    }
 }
 
 fn format_uptime(seconds: u64) -> String {

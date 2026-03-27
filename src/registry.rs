@@ -43,14 +43,27 @@ impl Registry {
         };
 
         conn.execute_batch("PRAGMA journal_mode=WAL;").ok();
-        Self::migrate(&conn);
+
+        // Try migration — if it fails, the DB is corrupt
+        if Self::try_migrate(&conn).is_err() {
+            tracing::warn!("SQLite migration failed. Recreating DB.");
+            drop(conn);
+            let corrupt = db_path.with_extension("db.corrupt");
+            std::fs::rename(db_path, &corrupt).ok();
+            let conn = Connection::open(db_path).expect("Failed to create fresh DB");
+            conn.execute_batch("PRAGMA journal_mode=WAL;").ok();
+            Self::try_migrate(&conn).expect("Migration failed on fresh DB");
+            return Self {
+                conn: Mutex::new(conn),
+            };
+        }
 
         Self {
             conn: Mutex::new(conn),
         }
     }
 
-    fn migrate(conn: &Connection) {
+    fn try_migrate(conn: &Connection) -> Result<(), rusqlite::Error> {
         conn.execute_batch(
             "
             CREATE TABLE IF NOT EXISTS projects (
@@ -73,9 +86,19 @@ impl Registry {
                 stopped_at TEXT,
                 UNIQUE(project_id, port, started_at)
             );
+
+            -- project_id = 0 is reserved for global secrets.
+            CREATE TABLE IF NOT EXISTS secrets (
+                id         INTEGER PRIMARY KEY,
+                project_id INTEGER NOT NULL DEFAULT 0,
+                key        TEXT    NOT NULL,
+                nonce      BLOB    NOT NULL,
+                ciphertext BLOB    NOT NULL,
+                UNIQUE(project_id, key)
+            );
             ",
-        )
-        .expect("Failed to run migrations");
+        )?;
+        Ok(())
     }
 
     /// Update registry from a scan cycle. Returns WebSocket events for changes.
@@ -304,6 +327,62 @@ impl Registry {
         }
     }
 
+    pub fn set_start_cmd(&self, id: i64, cmd: &str) {
+        let conn = self.conn.lock().unwrap();
+        conn.execute(
+            "UPDATE projects SET start_cmd = ?1 WHERE id = ?2",
+            rusqlite::params![cmd, id],
+        )
+        .ok();
+    }
+
+    // ── Secrets ───────────────────────────────────────────────────────────────
+
+    pub fn set_secret(&self, project_id: i64, key: &str, nonce: &[u8], ciphertext: &[u8]) {
+        let conn = self.conn.lock().unwrap();
+        conn.execute(
+            "INSERT OR REPLACE INTO secrets (project_id, key, nonce, ciphertext) \
+             VALUES (?1, ?2, ?3, ?4)",
+            rusqlite::params![project_id, key, nonce, ciphertext],
+        )
+        .ok();
+    }
+
+    pub fn get_secret(&self, project_id: i64, key: &str) -> Option<(Vec<u8>, Vec<u8>)> {
+        let conn = self.conn.lock().unwrap();
+        conn.query_row(
+            "SELECT nonce, ciphertext FROM secrets WHERE project_id = ?1 AND key = ?2",
+            rusqlite::params![project_id, key],
+            |row| Ok((row.get::<_, Vec<u8>>(0)?, row.get::<_, Vec<u8>>(1)?)),
+        )
+        .ok()
+    }
+
+    pub fn list_secret_keys(&self, project_id: i64) -> Vec<String> {
+        let conn = self.conn.lock().unwrap();
+        let mut stmt = match conn
+            .prepare("SELECT key FROM secrets WHERE project_id = ?1 ORDER BY key")
+        {
+            Ok(s) => s,
+            Err(_) => return vec![],
+        };
+        let result: Vec<String> = match stmt.query_map([project_id], |row| row.get(0)) {
+            Ok(rows) => rows.filter_map(|r| r.ok()).collect(),
+            Err(_) => vec![],
+        };
+        result
+    }
+
+    pub fn delete_secret(&self, project_id: i64, key: &str) -> bool {
+        let conn = self.conn.lock().unwrap();
+        conn.execute(
+            "DELETE FROM secrets WHERE project_id = ?1 AND key = ?2",
+            rusqlite::params![project_id, key],
+        )
+        .map(|n| n > 0)
+        .unwrap_or(false)
+    }
+
     pub fn add_project(&self, path: &str, name: &str) -> i64 {
         let conn = self.conn.lock().unwrap();
         let now = chrono::Utc::now().to_rfc3339();
@@ -322,9 +401,215 @@ impl Registry {
         conn.execute("DELETE FROM projects WHERE id = ?1", [id]).ok();
     }
 
+    #[allow(dead_code)]
     pub fn find_project_by_name(&self, name: &str) -> Option<Project> {
         self.get_all_projects()
             .into_iter()
             .find(|p| p.name == name || p.path == name)
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use tempfile::TempDir;
+
+    fn test_registry() -> (Registry, TempDir) {
+        let tmp = TempDir::new().unwrap();
+        let db_path = tmp.path().join("test.db");
+        let registry = Registry::open(&db_path);
+        (registry, tmp)
+    }
+
+    #[test]
+    fn test_add_and_get_project() {
+        let (registry, _tmp) = test_registry();
+        let id = registry.add_project("/Users/test/my-app", "my-app");
+        assert!(id > 0);
+
+        let projects = registry.get_all_projects();
+        assert_eq!(projects.len(), 1);
+        assert_eq!(projects[0].name, "my-app");
+        assert_eq!(projects[0].path, "/Users/test/my-app");
+    }
+
+    #[test]
+    fn test_add_duplicate_path_ignored() {
+        let (registry, _tmp) = test_registry();
+        registry.add_project("/Users/test/my-app", "my-app");
+        registry.add_project("/Users/test/my-app", "my-app-duplicate");
+
+        let projects = registry.get_all_projects();
+        assert_eq!(projects.len(), 1);
+        assert_eq!(projects[0].name, "my-app");
+    }
+
+    #[test]
+    fn test_remove_project() {
+        let (registry, _tmp) = test_registry();
+        let id = registry.add_project("/Users/test/my-app", "my-app");
+        registry.remove_project(id);
+
+        let projects = registry.get_all_projects();
+        assert!(projects.is_empty());
+    }
+
+    #[test]
+    fn test_update_favorite() {
+        let (registry, _tmp) = test_registry();
+        let id = registry.add_project("/Users/test/my-app", "my-app");
+
+        registry.update_project(id, Some(true), None);
+        let project = registry.get_project(id).unwrap();
+        assert!(project.favorite);
+
+        registry.update_project(id, Some(false), None);
+        let project = registry.get_project(id).unwrap();
+        assert!(!project.favorite);
+    }
+
+    #[test]
+    fn test_update_preferred_port() {
+        let (registry, _tmp) = test_registry();
+        let id = registry.add_project("/Users/test/my-app", "my-app");
+
+        registry.update_project(id, None, Some(3000));
+        let project = registry.get_project(id).unwrap();
+        assert_eq!(project.preferred_port, Some(3000));
+    }
+
+    #[test]
+    fn test_get_nonexistent_project() {
+        let (registry, _tmp) = test_registry();
+        assert!(registry.get_project(999).is_none());
+    }
+
+    #[test]
+    fn test_empty_registry() {
+        let (registry, _tmp) = test_registry();
+        let projects = registry.get_all_projects();
+        assert!(projects.is_empty());
+    }
+
+    #[test]
+    fn test_find_project_by_name() {
+        let (registry, _tmp) = test_registry();
+        registry.add_project("/Users/test/my-app", "my-app");
+        registry.add_project("/Users/test/other", "other");
+
+        let found = registry.find_project_by_name("my-app");
+        assert!(found.is_some());
+        assert_eq!(found.unwrap().name, "my-app");
+
+        let not_found = registry.find_project_by_name("nope");
+        assert!(not_found.is_none());
+    }
+
+    #[test]
+    fn test_find_project_by_path() {
+        let (registry, _tmp) = test_registry();
+        registry.add_project("/Users/test/my-app", "my-app");
+
+        let found = registry.find_project_by_name("/Users/test/my-app");
+        assert!(found.is_some());
+    }
+
+    #[test]
+    fn test_update_from_scan() {
+        let (registry, _tmp) = test_registry();
+        let results = vec![
+            crate::scanner::types::ScanResult {
+                port: 3000,
+                pid: 1234,
+                cwd: Some("/Users/test/frontend".to_string()),
+                project_root: Some("/Users/test/frontend".to_string()),
+                project_name: Some("frontend".to_string()),
+                framework: Some("nextjs".to_string()),
+                start_cmd: Some("npm run dev".to_string()),
+            },
+            crate::scanner::types::ScanResult {
+                port: 8080,
+                pid: 5678,
+                cwd: Some("/Users/test/api".to_string()),
+                project_root: Some("/Users/test/api".to_string()),
+                project_name: Some("api".to_string()),
+                framework: Some("express".to_string()),
+                start_cmd: Some("node server.js".to_string()),
+            },
+        ];
+
+        let events = registry.update_from_scan(&results);
+        assert!(!events.is_empty());
+
+        let projects = registry.get_all_projects();
+        assert_eq!(projects.len(), 2);
+
+        let frontend = projects.iter().find(|p| p.name == "frontend").unwrap();
+        assert_eq!(frontend.framework.as_deref(), Some("nextjs"));
+        assert!(frontend.ports.contains(&3000));
+    }
+
+    #[test]
+    fn test_port_stopped_on_missing_scan() {
+        let (registry, _tmp) = test_registry();
+
+        // First scan: project running on 3000
+        let results1 = vec![crate::scanner::types::ScanResult {
+            port: 3000,
+            pid: 1234,
+            cwd: Some("/Users/test/app".to_string()),
+            project_root: Some("/Users/test/app".to_string()),
+            project_name: Some("app".to_string()),
+            framework: Some("nextjs".to_string()),
+            start_cmd: None,
+        }];
+        registry.update_from_scan(&results1);
+
+        let projects = registry.get_all_projects();
+        assert_eq!(projects[0].ports.len(), 1);
+
+        // Second scan: project no longer running
+        let events = registry.update_from_scan(&[]);
+
+        // Should have a PortStopped event
+        let has_stop = events.iter().any(|e| matches!(e, crate::ws::WsEvent::PortStopped { .. }));
+        assert!(has_stop);
+    }
+
+    #[test]
+    fn test_favorites_sorted_first() {
+        let (registry, _tmp) = test_registry();
+        let id1 = registry.add_project("/Users/test/alpha", "alpha");
+        let id2 = registry.add_project("/Users/test/beta", "beta");
+
+        registry.update_project(id2, Some(true), None);
+
+        let projects = registry.get_all_projects();
+        assert_eq!(projects[0].name, "beta"); // favorite first
+        assert_eq!(projects[1].name, "alpha");
+
+        // Unfavorite beta, favorite alpha
+        registry.update_project(id2, Some(false), None);
+        registry.update_project(id1, Some(true), None);
+
+        let projects = registry.get_all_projects();
+        assert_eq!(projects[0].name, "alpha");
+    }
+
+    #[test]
+    fn test_db_corruption_recovery() {
+        let tmp = TempDir::new().unwrap();
+        let db_path = tmp.path().join("test.db");
+
+        // Write garbage to the DB file
+        std::fs::write(&db_path, "this is not a sqlite database").unwrap();
+
+        // Should recover by creating a fresh DB
+        let registry = Registry::open(&db_path);
+        let projects = registry.get_all_projects();
+        assert!(projects.is_empty());
+
+        // Corrupt file should be renamed
+        assert!(tmp.path().join("test.db.corrupt").exists());
     }
 }

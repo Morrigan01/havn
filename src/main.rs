@@ -4,6 +4,7 @@ mod config;
 mod mcp;
 mod registry;
 mod scanner;
+mod secrets;
 mod server;
 mod service;
 mod ws;
@@ -25,6 +26,11 @@ async fn main() {
         Some(cli::Command::Logs) => cli::logs().await,
         Some(cli::Command::Mcp) => cli::mcp(&args).await,
         Some(cli::Command::InstallService) => cli::install_service(),
+        Some(cli::Command::Restart { target }) => cli::restart(&args, target).await,
+        Some(cli::Command::SetStartCmd { project, cmd }) => {
+            cli::set_start_cmd(&args, project, cmd).await
+        }
+        Some(cli::Command::Secret { action }) => cli::secret(&args, action).await,
         None => {
             let bind = args.bind.clone();
             let port = args.port;

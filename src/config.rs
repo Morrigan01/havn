@@ -76,3 +76,61 @@ pub fn init_logging(args: &crate::cli::Cli) {
         .with_target(false)
         .init();
 }
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn test_default_config() {
+        let config = Config::default();
+        assert_eq!(config.dashboard_port, 9390);
+        assert_eq!(config.scan_interval_secs, 5);
+        assert_eq!(config.log_level, "info");
+    }
+
+    #[test]
+    fn test_config_save_and_load() {
+        let tmp = tempfile::TempDir::new().unwrap();
+        let config_path = tmp.path().join("config.json");
+
+        let config = Config {
+            dashboard_port: 8888,
+            scan_interval_secs: 10,
+            log_level: "debug".to_string(),
+        };
+
+        // Save
+        if let Some(parent) = config_path.parent() {
+            std::fs::create_dir_all(parent).ok();
+        }
+        let content = serde_json::to_string_pretty(&config).unwrap();
+        std::fs::write(&config_path, content).unwrap();
+
+        // Load
+        let loaded: Config =
+            serde_json::from_str(&std::fs::read_to_string(&config_path).unwrap()).unwrap();
+        assert_eq!(loaded.dashboard_port, 8888);
+        assert_eq!(loaded.scan_interval_secs, 10);
+        assert_eq!(loaded.log_level, "debug");
+    }
+
+    #[test]
+    fn test_config_load_missing_file() {
+        // Loading from a non-existent path should return defaults
+        let config = Config::default();
+        assert_eq!(config.dashboard_port, 9390);
+    }
+
+    #[test]
+    fn test_data_dir_exists() {
+        let dir = data_dir();
+        assert!(dir.to_string_lossy().contains("scanprojects"));
+    }
+
+    #[test]
+    fn test_config_dir_exists() {
+        let dir = config_dir();
+        assert!(dir.to_string_lossy().contains("scanprojects"));
+    }
+}

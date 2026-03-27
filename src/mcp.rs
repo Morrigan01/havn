@@ -36,6 +36,36 @@ pub struct FindPortParams {
     pub project: String,
 }
 
+#[derive(Serialize, Deserialize, JsonSchema)]
+pub struct RestartProjectParams {
+    /// Project name to restart
+    pub name: String,
+}
+
+#[derive(Serialize, Deserialize, JsonSchema)]
+pub struct ListSecretsParams {
+    /// Project name to scope to (omit for global secrets)
+    pub project: Option<String>,
+}
+
+#[derive(Serialize, Deserialize, JsonSchema)]
+pub struct GetSecretParams {
+    /// Secret key
+    pub key: String,
+    /// Project name to scope to (omit for global secrets)
+    pub project: Option<String>,
+}
+
+#[derive(Serialize, Deserialize, JsonSchema)]
+pub struct SetSecretParams {
+    /// Secret key
+    pub key: String,
+    /// Secret value (will be encrypted at rest)
+    pub value: String,
+    /// Project name to scope to (omit for global secrets)
+    pub project: Option<String>,
+}
+
 #[tool_router]
 impl McpServer {
     pub fn new(api_url: String) -> Self {
@@ -83,7 +113,7 @@ impl McpServer {
     async fn kill_port(&self, params: Parameters<KillPortParams>) -> String {
         let client = reqwest::Client::new();
         match client
-            .post(&format!("{}/kill/{}", self.api_url, params.0.port))
+            .post(format!("{}/kill/{}", self.api_url, params.0.port))
             .send()
             .await
         {
@@ -91,6 +121,111 @@ impl McpServer {
                 Ok(body) => body,
                 Err(e) => format!("Error: {}", e),
             },
+            Err(_) => "scanprojects server not running.".to_string(),
+        }
+    }
+
+    /// Kill a running project and restart it using its configured start command.
+    #[tool(
+        name = "restart_project",
+        description = "Kill and restart a project using its configured start command"
+    )]
+    async fn restart_project(&self, params: Parameters<RestartProjectParams>) -> String {
+        let projects_resp = match reqwest::get(&format!("{}/projects", self.api_url)).await {
+            Ok(r) => r,
+            Err(_) => return "scanprojects server not running.".to_string(),
+        };
+        let projects: Vec<serde_json::Value> = match projects_resp.json().await {
+            Ok(p) => p,
+            Err(e) => return format!("Error: {}", e),
+        };
+        match projects
+            .iter()
+            .find(|p| p.get("name").and_then(|n| n.as_str()) == Some(&params.0.name))
+        {
+            Some(project) => {
+                let id = project.get("id").and_then(|i| i.as_i64()).unwrap_or(0);
+                let client = reqwest::Client::new();
+                match client
+                    .post(format!("{}/projects/{}/restart", self.api_url, id))
+                    .send()
+                    .await
+                {
+                    Ok(resp) => resp.text().await.unwrap_or_default(),
+                    Err(e) => format!("Error: {}", e),
+                }
+            }
+            None => format!("Project '{}' not found.", params.0.name),
+        }
+    }
+
+    /// List stored secret keys for a project (values are not returned).
+    #[tool(
+        name = "list_secrets",
+        description = "List secret keys stored for a project (values are never returned)"
+    )]
+    async fn list_secrets(&self, params: Parameters<ListSecretsParams>) -> String {
+        let mut url = format!("{}/secrets", self.api_url);
+        if let Some(ref p) = params.0.project {
+            url = format!("{}?project={}", url, p);
+        }
+        match reqwest::get(&url).await {
+            Ok(resp) => resp.text().await.unwrap_or_default(),
+            Err(_) => "scanprojects server not running.".to_string(),
+        }
+    }
+
+    /// Get a decrypted secret value by key.
+    #[tool(
+        name = "get_secret",
+        description = "Retrieve a decrypted secret value by key"
+    )]
+    async fn get_secret(&self, params: Parameters<GetSecretParams>) -> String {
+        let mut url = format!("{}/secrets/{}", self.api_url, params.0.key);
+        if let Some(ref p) = params.0.project {
+            url = format!("{}?project={}", url, p);
+        }
+        let client = reqwest::Client::new();
+        match client.get(&url).send().await {
+            Ok(resp) if resp.status().is_success() => {
+                let data: serde_json::Value = resp.json().await.unwrap_or_default();
+                data.get("value")
+                    .and_then(|v| v.as_str())
+                    .unwrap_or("")
+                    .to_string()
+            }
+            Ok(resp) if resp.status() == 404 => {
+                format!("Secret '{}' not found.", params.0.key)
+            }
+            Ok(_) => "Error retrieving secret.".to_string(),
+            Err(_) => "scanprojects server not running.".to_string(),
+        }
+    }
+
+    /// Store an encrypted secret.
+    #[tool(
+        name = "set_secret",
+        description = "Store an encrypted secret (AES-256-GCM, persisted locally)"
+    )]
+    async fn set_secret(&self, params: Parameters<SetSecretParams>) -> String {
+        let mut body = serde_json::json!({
+            "key": params.0.key,
+            "value": params.0.value,
+        });
+        if let Some(ref p) = params.0.project {
+            body["project"] = serde_json::json!(p);
+        }
+        let client = reqwest::Client::new();
+        match client
+            .post(format!("{}/secrets", self.api_url))
+            .json(&body)
+            .send()
+            .await
+        {
+            Ok(resp) if resp.status().is_success() => {
+                format!("Secret '{}' stored.", params.0.key)
+            }
+            Ok(resp) => resp.text().await.unwrap_or_default(),
             Err(_) => "scanprojects server not running.".to_string(),
         }
     }

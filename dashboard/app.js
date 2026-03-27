@@ -18,10 +18,19 @@ let connected = false;
 let lastScan = null;
 let toasts = [];
 
+// Pending-update state — changes are buffered here instead of triggering
+// a full re-render on every scan cycle, which caused the 5 s flicker.
+let pendingCount = 0;
+let pendingTimer = null;
+
 const $ = (sel) => document.querySelector(sel);
 const app = () => $('#app');
 
 function render() {
+  // Consume any buffered pending state — render IS the flush.
+  pendingCount = 0;
+  clearTimeout(pendingTimer);
+
   const filtered = projects.filter(p =>
     !filter || p.name.toLowerCase().includes(filter.toLowerCase()) ||
     (p.framework || '').toLowerCase().includes(filter.toLowerCase()) ||
@@ -43,7 +52,7 @@ function render() {
       <div class="stats">
         ${projectCount} project${projectCount !== 1 ? 's' : ''} &middot;
         ${portCount} port${portCount !== 1 ? 's' : ''} &middot;
-        scanned <span class="${scanStale ? 'stale' : ''}">${scanAgo}</span>
+        <span class="live-dot"></span>scanned <span id="scan-time" class="${scanStale ? 'stale' : ''}">${scanAgo}</span>
       </div>
     </div>
     <div class="search">
@@ -116,6 +125,7 @@ function projectRow(p, index) {
       <span class="uptime">${uptime}</span>
       <div class="actions">
         ${p.ports.length > 0 ? `<button class="open-btn" onclick="window._openInBrowser(${p.ports[0]})" aria-label="Open in browser">Open</button>` : ''}
+        ${p.start_cmd ? `<button class="restart-btn" onclick="window._restart(${p.id}, '${esc(p.name)}')" aria-label="Restart ${esc(p.name)}">Restart</button>` : ''}
         <button class="kill-btn" onclick="window._kill(${p.id}, '${esc(p.name)}')"
                 aria-label="Kill ${esc(p.name)}">Kill</button>
       </div>
@@ -146,21 +156,51 @@ window._kill = async (id, name) => {
     const resp = await fetch(`/projects/${id}/kill`, { method: 'POST' });
     if (resp.ok) {
       showToast(`Killed: ${name}`, 'success');
-      // Grey out the row immediately
       const p = projects.find(p => p.id === id);
       if (p) { p.ports = []; p.pids = []; }
       render();
     } else {
       const data = await resp.json().catch(() => ({}));
       showToast(`Kill failed: ${data.message || 'Unknown error'}`, 'error');
+      btn.disabled = false;
+      btn.textContent = 'Kill';
     }
   } catch (e) {
     showToast(`Kill failed: ${e.message}`, 'error');
+    btn.disabled = false;
+    btn.textContent = 'Kill';
+  }
+};
+
+window._restart = async (id, name) => {
+  const btn = event.target;
+  btn.disabled = true;
+  btn.textContent = 'Restarting...';
+  try {
+    const resp = await fetch(`/projects/${id}/restart`, { method: 'POST' });
+    if (resp.ok) {
+      showToast(`Restarting: ${name}`, 'success');
+    } else {
+      const data = await resp.json().catch(() => ({}));
+      showToast(`Restart failed: ${data.message || 'No start command configured'}`, 'error');
+    }
+  } catch (e) {
+    showToast(`Restart failed: ${e.message}`, 'error');
+  } finally {
+    btn.disabled = false;
+    btn.textContent = 'Restart';
   }
 };
 
 window._openInBrowser = (port) => {
   window.open(`http://localhost:${port}`, '_blank');
+};
+
+// Flush pending updates immediately (called by badge click or auto-timer).
+window._flushPending = () => {
+  pendingCount = 0;
+  clearTimeout(pendingTimer);
+  render();
 };
 
 function showToast(message, type) {
@@ -171,6 +211,30 @@ function showToast(message, type) {
     toasts = toasts.filter(t => t.id !== toast.id);
     render();
   }, 5000);
+}
+
+// Buffer a data change instead of re-rendering immediately.
+// Shows a ↻ badge in the header; auto-flushes after 3 s of quiet.
+function deferRender() {
+  pendingCount++;
+  _injectOrUpdateBadge();
+  clearTimeout(pendingTimer);
+  pendingTimer = setTimeout(window._flushPending, 3000);
+}
+
+function _injectOrUpdateBadge() {
+  let badge = document.getElementById('update-badge');
+  if (!badge) {
+    const header = document.querySelector('.header');
+    if (!header) return;
+    badge = document.createElement('button');
+    badge.id = 'update-badge';
+    badge.className = 'update-badge';
+    badge.title = 'Updates ready — click to apply';
+    badge.onclick = window._flushPending;
+    header.appendChild(badge);
+  }
+  badge.textContent = pendingCount > 1 ? `↻ ${pendingCount}` : '↻';
 }
 
 // WebSocket
@@ -184,24 +248,28 @@ function connectWs() {
     const msg = JSON.parse(e.data);
     switch (msg.type) {
       case 'full_sync':
+        // Full sync on connect/reconnect — apply immediately, clear any stale pending.
         projects = msg.data;
+        pendingCount = 0;
+        clearTimeout(pendingTimer);
         render();
         break;
       case 'project_added':
         projects.push(msg.data);
-        render();
+        deferRender();
         break;
       case 'project_updated':
         projects = projects.map(p => p.id === msg.data.id ? msg.data : p);
-        render();
+        deferRender();
         break;
       case 'project_removed':
         projects = projects.filter(p => p.id !== msg.id);
-        render();
+        deferRender();
         break;
       case 'scan_completed':
+        // Just update the timestamp — the setInterval handles the display.
+        // No render: this is the heartbeat that was causing the 5 s flicker.
         lastScan = Date.now();
-        render();
         break;
     }
   };
@@ -244,18 +312,13 @@ function isLightColor(hex) {
   return (r * 299 + g * 587 + b * 114) / 1000 > 128;
 }
 
-// Update scan timer every second
+// Update the scan timestamp every second without a full re-render.
 setInterval(() => {
   if (lastScan) {
-    const statsEl = document.querySelector('.stats');
-    if (statsEl) {
-      const scanAgo = timeSince(lastScan);
-      const scanStale = (Date.now() - lastScan) > 15000;
-      const spans = statsEl.querySelectorAll('span');
-      if (spans.length > 0) {
-        spans[0].textContent = scanAgo;
-        spans[0].className = scanStale ? 'stale' : '';
-      }
+    const el = document.getElementById('scan-time');
+    if (el) {
+      el.textContent = timeSince(lastScan);
+      el.className = (Date.now() - lastScan) > 15000 ? 'stale' : '';
     }
   }
 }, 1000);

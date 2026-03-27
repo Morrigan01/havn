@@ -1,38 +1,54 @@
 pub mod lsof;
 pub mod project;
 pub mod types;
+pub mod watcher;
 
 use std::sync::Arc;
 use std::time::Duration;
 
 use tokio::sync::broadcast;
 use types::ScanResult;
+use watcher::ProcessWatcher;
 
 use crate::registry::Registry;
 use crate::ws::WsEvent;
 
-/// Run the scanner loop. Polls every `interval` seconds.
+/// Run the scanner loop.
+///
+/// On macOS the loop wakes immediately when a watched process exits (kqueue);
+/// on other platforms it falls back to polling every `interval_secs` seconds.
 pub async fn run_loop(
     registry: Arc<Registry>,
     tx: broadcast::Sender<WsEvent>,
     interval_secs: u64,
 ) {
+    let watcher = ProcessWatcher::spawn();
     let interval = Duration::from_secs(interval_secs);
 
     loop {
-        match scan_and_update(&registry, &tx).await {
-            Ok(_) => {}
-            Err(e) => tracing::warn!("Scan cycle failed: {}", e),
-        }
-        tokio::time::sleep(interval).await;
+        let results = match scan_and_update(&registry, &tx).await {
+            Ok(r) => r,
+            Err(e) => {
+                tracing::warn!("Scan cycle failed: {}", e);
+                vec![]
+            }
+        };
+
+        // Hand the live PIDs to the watcher so it can detect exits.
+        let pids: Vec<u32> = results.iter().map(|r| r.pid).collect();
+        watcher.watch_pids(pids);
+
+        // Wait for a process-exit event or the fallback interval.
+        watcher.wait_for_event(interval).await;
     }
 }
 
 /// Perform a single scan cycle: detect ports, resolve projects, update registry.
+/// Returns the scan results so the caller can register PIDs with the watcher.
 async fn scan_and_update(
     registry: &Registry,
     tx: &broadcast::Sender<WsEvent>,
-) -> Result<(), String> {
+) -> Result<Vec<ScanResult>, String> {
     let results = scan_once().await;
 
     let changes = registry.update_from_scan(&results);
@@ -42,12 +58,12 @@ async fn scan_and_update(
         }
     }
 
-    // Always send scan_completed so dashboard knows we're alive
+    // Always send scan_completed so the dashboard knows we're alive.
     let _ = tx.send(WsEvent::ScanCompleted {
         timestamp: chrono::Utc::now().to_rfc3339(),
     });
 
-    Ok(())
+    Ok(results)
 }
 
 /// One-shot scan: detect listening ports and resolve to projects.
@@ -98,11 +114,21 @@ pub async fn scan_once() -> Vec<ScanResult> {
         // Get start command
         let start_cmd = get_start_cmd(entry.pid).await;
 
+        let project_root = project.as_ref().map(|p| p.root.clone());
+
+        // Deduplicate: skip if we already have this port+project combination
+        let dominated = results.iter().any(|r: &ScanResult| {
+            r.port == entry.port && r.project_root == project_root
+        });
+        if dominated {
+            continue;
+        }
+
         results.push(ScanResult {
             port: entry.port,
             pid: entry.pid,
             cwd,
-            project_root: project.as_ref().map(|p| p.root.clone()),
+            project_root,
             project_name: project.as_ref().map(|p| p.name.clone()),
             framework: project.as_ref().and_then(|p| p.framework.clone()),
             start_cmd,
@@ -130,6 +156,11 @@ fn is_system_process(cwd: &str) -> bool {
 
 /// Common dev ports that should be shown even without a resolved project.
 fn is_common_dev_port(port: u16) -> bool {
+    // Exclude well-known service ports even if they fall in dev ranges
+    const SERVICE_PORTS: &[u16] = &[5432, 5433, 5672, 6379, 6380, 9200, 9300];
+    if SERVICE_PORTS.contains(&port) {
+        return false;
+    }
     matches!(
         port,
         3000..=3999 | 4000..=4999 | 5000..=5999 | 8000..=8999 | 9000..=9999
@@ -152,5 +183,41 @@ async fn get_start_cmd(pid: u32) -> Option<String> {
         }
     } else {
         None
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn test_is_system_process() {
+        assert!(is_system_process("/System/Library/something"));
+        assert!(is_system_process("/usr/sbin/httpd"));
+        assert!(is_system_process("/Library/Apple/something"));
+        assert!(is_system_process("/opt/homebrew/Cellar/node/21.0/bin/node"));
+        assert!(is_system_process("/private/var/something"));
+
+        assert!(!is_system_process("/Users/dev/my-project"));
+        assert!(!is_system_process("/home/dev/my-project"));
+        assert!(!is_system_process("/opt/homebrew")); // bare homebrew prefix is not filtered
+    }
+
+    #[test]
+    fn test_is_common_dev_port() {
+        assert!(is_common_dev_port(3000));
+        assert!(is_common_dev_port(3001));
+        assert!(is_common_dev_port(4200));
+        assert!(is_common_dev_port(5173));
+        assert!(is_common_dev_port(8000));
+        assert!(is_common_dev_port(8080));
+        assert!(is_common_dev_port(9390));
+
+        assert!(!is_common_dev_port(22));    // SSH
+        assert!(!is_common_dev_port(80));    // HTTP
+        assert!(!is_common_dev_port(443));   // HTTPS
+        assert!(!is_common_dev_port(5432));  // PostgreSQL
+        assert!(!is_common_dev_port(6379));  // Redis
+        assert!(!is_common_dev_port(27017)); // MongoDB
     }
 }

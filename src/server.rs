@@ -13,6 +13,7 @@ use crate::api::{self, AppState, SharedState};
 use crate::config;
 use crate::registry::Registry;
 use crate::scanner;
+use crate::secrets::SecretStore;
 use crate::ws::WsEvent;
 
 #[derive(Embed)]
@@ -22,21 +23,28 @@ struct DashboardAssets;
 pub async fn run(bind: String, port: u16) {
     let db_path = config::db_path();
     let registry = Arc::new(Registry::open(&db_path));
+    let secrets = Arc::new(SecretStore::new(registry.clone()));
     let (tx, _rx) = broadcast::channel::<WsEvent>(256);
 
     let state: AppState = Arc::new(SharedState {
         registry: registry.clone(),
         tx: tx.clone(),
+        secrets,
     });
 
     let app = Router::new()
         .route("/projects", get(api::get_projects))
         .route("/projects", post(api::add_project))
         .route("/projects/{id}/kill", post(api::kill_project))
+        .route("/projects/{id}/restart", post(api::restart_project))
         .route("/projects/{id}", patch(api::patch_project))
         .route("/projects/{id}", delete(api::delete_project))
         .route("/ports", get(api::get_ports))
         .route("/kill/{port}", post(api::kill_port))
+        .route("/secrets", get(api::list_secrets))
+        .route("/secrets", post(api::set_secret))
+        .route("/secrets/{key}", get(api::get_secret))
+        .route("/secrets/{key}", delete(api::delete_secret))
         .route("/ws", get(ws_handler))
         .fallback(get(serve_dashboard))
         .with_state(state);
