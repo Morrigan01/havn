@@ -19,7 +19,19 @@ Agent-friendly local secret store so AI coding tools can access API keys.
 `scanprojects secret set/get/list/delete`. MCP tools `list_secrets`, `get_secret`,
 `set_secret`. Per-project scoping via `--project` flag.
 
-## v2 — DESIGN.md
+## v2 — DESIGN.md ✓
 Create a formal design system document for the dashboard.
-**Why:** As the UI grows (settings page, project detail view), need consistent design tokens.
-**How:** Run /design-consultation to produce DESIGN.md with typography, colors, spacing, components.
+**Done:** `DESIGN.md` — IBM Plex type system, phosphor green / off-paper tokens, spacing scale,
+motion rules, v3 north star directions from Codex + subagent.
+
+## v3 — Dashboard redesign ✓
+Implement the v3 north star directions from DESIGN.md.
+**Done:** Left rail (220px) with oversized live counts and sidebar tabs (Projects / Secrets).
+Stacked cards replace flat rows. Hold-to-kill gesture (600ms, progress bar). Actions
+hidden until hover. Manual light/dark toggle persisted in localStorage.
+
+## v3 — .env auto-detection + secret injection ✓
+Projects' .env files surfaced in the dashboard; secrets injected on restart.
+**Done:** `src/env_file.rs` reads .env/.env.local/.env.{development,production,test}.
+Dashboard Secrets tab shows env keys per project with inline edit (writes back to disk).
+`restart_project` loads global + project-scoped store secrets and injects them as env vars.
