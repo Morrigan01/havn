@@ -16,9 +16,9 @@ let projects = [];
 let envSecrets = [];
 // storeSecrets: [{key, projectName: string|null}]
 let storeSecrets = [];
-let revealedSecrets = {}; // "key@scope" → plaintext value
-let editingSecret = null; // "key@scope" currently being edited
-let secretsCollapsed = false;
+let revealedSecrets = {};      // "key@scope" → plaintext value
+let editingSecret = null;      // "key@scope" currently being edited
+let collapsedProjects = new Set(); // project names collapsed in secrets panel
 let filter = '';
 let ws = null;
 let connected = false;
@@ -153,11 +153,8 @@ function secretsSection() {
 
   let html = `
     <div class="section-label-row">
-      <button class="section-collapse-btn" onclick="window._toggleSecrets()" aria-label="${secretsCollapsed ? 'Expand' : 'Collapse'} secrets">
-        <span class="collapse-arrow ${secretsCollapsed ? 'collapsed' : ''}">▾</span>
-        <span class="section-label" style="background:none;border:none;padding:0">Secrets${countLabel}</span>
-      </button>
-      ${!secretsCollapsed ? `<form class="add-secret-form" onsubmit="window._setSecret(event)">
+      <span class="section-label">Secrets${countLabel}</span>
+      <form class="add-secret-form" onsubmit="window._setSecret(event)">
         <input name="key" placeholder="KEY" required autocomplete="off" spellcheck="false">
         <input name="value" type="password" placeholder="value" required autocomplete="new-password">
         <select name="project">
@@ -165,32 +162,60 @@ function secretsSection() {
           ${projectOptions}
         </select>
         <button type="submit" class="set-btn">Add to store</button>
-      </form>` : ''}
+      </form>
     </div>`;
 
-  if (secretsCollapsed) return html;
-
+  const globalStore = storeSecrets.filter(s => !s.projectName);
   const hasEnv = envSecrets.length > 0;
-  const hasStore = storeSecrets.length > 0;
+  const hasProjectStore = storeSecrets.some(s => s.projectName);
 
-  if (!hasEnv && !hasStore) {
+  if (!hasEnv && storeSecrets.length === 0) {
     html += `<div class="secrets-empty">No secrets found. Start a project with a .env file or add one to the store.</div>`;
     return html;
   }
 
-  // ── .env file secrets grouped by project ──────────────────────────────────
-  if (hasEnv) {
-    // Group by project
-    const byProject = {};
-    envSecrets.forEach(s => {
-      const k = s.projectName;
-      if (!byProject[k]) byProject[k] = [];
-      byProject[k].push(s);
+  // ── Global store secrets — always visible at top ───────────────────────────
+  if (globalStore.length > 0) {
+    globalStore.forEach(({ key }) => {
+      const scopeKey = `${key}@store:`;
+      const revealed = revealedSecrets[scopeKey];
+      html += `
+        <div class="secret-row">
+          <span class="scope-tag global">global</span>
+          <span class="secret-key">${esc(key)}</span>
+          <span class="secret-value-cell ${revealed ? 'revealed' : ''}">${revealed ? esc(revealed) : '••••••••'}</span>
+          <div class="secret-actions">
+            <button class="reveal-btn" onclick="window._revealStoreSecret('${esc(key)}',null)">${revealed ? 'Hide' : 'Reveal'}</button>
+            <button class="delete-secret-btn" onclick="window._deleteSecret('${esc(key)}',null)">Delete</button>
+          </div>
+        </div>`;
     });
+  }
 
-    Object.entries(byProject).forEach(([projectName, entries]) => {
-      html += `<div class="section-label" style="padding-left:16px">${esc(projectName)}</div>`;
-      entries.forEach(({ key, value, file, file_path, projectId }) => {
+  // ── Per-project sections — each collapsible ────────────────────────────────
+  // Build a unified list of project names that have any secrets
+  const projectNames = [
+    ...new Set([
+      ...envSecrets.map(s => s.projectName),
+      ...storeSecrets.filter(s => s.projectName).map(s => s.projectName),
+    ])
+  ];
+
+  projectNames.forEach(projectName => {
+    const projEnv = envSecrets.filter(s => s.projectName === projectName);
+    const projStore = storeSecrets.filter(s => s.projectName === projectName);
+    const count = projEnv.length + projStore.length;
+    const collapsed = collapsedProjects.has(projectName);
+
+    html += `
+      <div class="project-secrets-header" onclick="window._toggleProjectSecrets('${esc(projectName)}')">
+        <span class="collapse-arrow ${collapsed ? 'collapsed' : ''}">▾</span>
+        <span class="project-secrets-name">${esc(projectName)}</span>
+        <span class="secrets-count">${count}</span>
+      </div>`;
+
+    if (!collapsed) {
+      projEnv.forEach(({ key, value, file, file_path, projectId }) => {
         const scopeKey = `${key}@env:${projectId}`;
         const revealed = revealedSecrets[scopeKey];
         const isEditing = editingSecret === scopeKey;
@@ -204,54 +229,32 @@ function secretsSection() {
                    <button type="submit" class="set-btn">Save</button>
                    <button type="button" class="reveal-btn" onclick="window._cancelEdit()">Cancel</button>
                  </form>`
-              : `<span class="secret-value-cell ${revealed ? 'revealed' : ''}">
-                   ${revealed ? esc(value) : '••••••••'}
-                 </span>`
+              : `<span class="secret-value-cell ${revealed ? 'revealed' : ''}">${revealed ? esc(value) : '••••••••'}</span>`
             }
             <div class="secret-actions">
               ${!isEditing ? `
-                <button class="reveal-btn"
-                  onclick="window._toggleEnvReveal('${esc(key)}',${projectId})">
-                  ${revealed ? 'Hide' : 'Reveal'}
-                </button>
-                <button class="reveal-btn"
-                  onclick="window._editEnvSecret('${scopeKey}')">
-                  Edit
-                </button>` : ''}
+                <button class="reveal-btn" onclick="window._toggleEnvReveal('${esc(key)}',${projectId})">${revealed ? 'Hide' : 'Reveal'}</button>
+                <button class="reveal-btn" onclick="window._editEnvSecret('${scopeKey}')">Edit</button>` : ''}
             </div>
           </div>`;
       });
-    });
-  }
 
-  // ── Encrypted store secrets ────────────────────────────────────────────────
-  if (hasStore) {
-    html += `<div class="section-label" style="padding-left:16px">Encrypted store</div>`;
-    storeSecrets.forEach(({ key, projectName }) => {
-      const scopeKey = `${key}@store:${projectName || ''}`;
-      const revealed = revealedSecrets[scopeKey];
-      const scopeLabel = projectName || 'global';
-      const isGlobal = !projectName;
-      html += `
-        <div class="secret-row">
-          <span class="scope-tag ${isGlobal ? 'global' : ''}">${esc(scopeLabel)}</span>
-          <span class="secret-key">${esc(key)}</span>
-          <span class="secret-value-cell ${revealed ? 'revealed' : ''}">
-            ${revealed ? esc(revealed) : '••••••••'}
-          </span>
-          <div class="secret-actions">
-            <button class="reveal-btn"
-              onclick="window._revealStoreSecret('${esc(key)}', ${projectName ? `'${esc(projectName)}'` : 'null'})">
-              ${revealed ? 'Hide' : 'Reveal'}
-            </button>
-            <button class="delete-secret-btn"
-              onclick="window._deleteSecret('${esc(key)}', ${projectName ? `'${esc(projectName)}'` : 'null'})">
-              Delete
-            </button>
-          </div>
-        </div>`;
-    });
-  }
+      projStore.forEach(({ key }) => {
+        const scopeKey = `${key}@store:${projectName}`;
+        const revealed = revealedSecrets[scopeKey];
+        html += `
+          <div class="secret-row">
+            <span class="scope-tag">store</span>
+            <span class="secret-key">${esc(key)}</span>
+            <span class="secret-value-cell ${revealed ? 'revealed' : ''}">${revealed ? esc(revealed) : '••••••••'}</span>
+            <div class="secret-actions">
+              <button class="reveal-btn" onclick="window._revealStoreSecret('${esc(key)}','${esc(projectName)}')">${revealed ? 'Hide' : 'Reveal'}</button>
+              <button class="delete-secret-btn" onclick="window._deleteSecret('${esc(key)}','${esc(projectName)}')">Delete</button>
+            </div>
+          </div>`;
+      });
+    }
+  });
 
   return html;
 }
@@ -355,8 +358,12 @@ window._openInBrowser = (port) => {
   window.open(`http://localhost:${port}`, '_blank');
 };
 
-window._toggleSecrets = () => {
-  secretsCollapsed = !secretsCollapsed;
+window._toggleProjectSecrets = (projectName) => {
+  if (collapsedProjects.has(projectName)) {
+    collapsedProjects.delete(projectName);
+  } else {
+    collapsedProjects.add(projectName);
+  }
   _refreshSecretsPanel();
 };
 

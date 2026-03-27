@@ -372,17 +372,27 @@ body {
   background: none;
 }
 
-.section-collapse-btn {
+.project-secrets-header {
   display: flex;
   align-items: center;
   gap: 6px;
-  background: none;
-  border: none;
+  padding: 6px 16px;
+  border-bottom: 1px solid var(--border);
+  background: var(--bg-primary);
   cursor: pointer;
-  padding: 0;
-  color: inherit;
+  user-select: none;
+  transition: background 120ms;
 }
-.section-collapse-btn:hover .section-label { color: var(--text-primary); }
+.project-secrets-header:hover { background: var(--bg-row-hover); }
+
+.project-secrets-name {
+  font-family: var(--font-mono);
+  font-size: 11px;
+  font-weight: 600;
+  color: var(--text-secondary);
+  letter-spacing: .02em;
+}
+.project-secrets-header:hover .project-secrets-name { color: var(--text-primary); }
 
 .collapse-arrow {
   font-size: 12px;
