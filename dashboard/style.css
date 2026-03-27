@@ -372,6 +372,39 @@ body {
   background: none;
 }
 
+.section-collapse-btn {
+  display: flex;
+  align-items: center;
+  gap: 6px;
+  background: none;
+  border: none;
+  cursor: pointer;
+  padding: 0;
+  color: inherit;
+}
+.section-collapse-btn:hover .section-label { color: var(--text-primary); }
+
+.collapse-arrow {
+  font-size: 12px;
+  color: var(--text-muted);
+  transition: transform 150ms ease;
+  display: inline-block;
+  line-height: 1;
+}
+.collapse-arrow.collapsed { transform: rotate(-90deg); }
+
+.secrets-count {
+  display: inline-block;
+  padding: 1px 5px;
+  border-radius: 3px;
+  font-size: 9px;
+  font-family: var(--font-mono);
+  font-weight: 600;
+  background: var(--border-2);
+  color: var(--text-muted);
+  vertical-align: middle;
+}
+
 .add-secret-form {
   display: flex;
   gap: 6px;

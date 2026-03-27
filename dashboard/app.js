@@ -18,6 +18,7 @@ let envSecrets = [];
 let storeSecrets = [];
 let revealedSecrets = {}; // "key@scope" → plaintext value
 let editingSecret = null; // "key@scope" currently being edited
+let secretsCollapsed = false;
 let filter = '';
 let ws = null;
 let connected = false;
@@ -147,10 +148,16 @@ function secretsSection() {
     .map(p => `<option value="${esc(p.name)}">${esc(p.name)}</option>`)
     .join('');
 
+  const totalCount = envSecrets.length + storeSecrets.length;
+  const countLabel = totalCount > 0 ? ` <span class="secrets-count">${totalCount}</span>` : '';
+
   let html = `
     <div class="section-label-row">
-      <span class="section-label">Secrets</span>
-      <form class="add-secret-form" onsubmit="window._setSecret(event)">
+      <button class="section-collapse-btn" onclick="window._toggleSecrets()" aria-label="${secretsCollapsed ? 'Expand' : 'Collapse'} secrets">
+        <span class="collapse-arrow ${secretsCollapsed ? 'collapsed' : ''}">▾</span>
+        <span class="section-label" style="background:none;border:none;padding:0">Secrets${countLabel}</span>
+      </button>
+      ${!secretsCollapsed ? `<form class="add-secret-form" onsubmit="window._setSecret(event)">
         <input name="key" placeholder="KEY" required autocomplete="off" spellcheck="false">
         <input name="value" type="password" placeholder="value" required autocomplete="new-password">
         <select name="project">
@@ -158,8 +165,10 @@ function secretsSection() {
           ${projectOptions}
         </select>
         <button type="submit" class="set-btn">Add to store</button>
-      </form>
+      </form>` : ''}
     </div>`;
+
+  if (secretsCollapsed) return html;
 
   const hasEnv = envSecrets.length > 0;
   const hasStore = storeSecrets.length > 0;
@@ -344,6 +353,11 @@ window._restart = async (id, name) => {
 
 window._openInBrowser = (port) => {
   window.open(`http://localhost:${port}`, '_blank');
+};
+
+window._toggleSecrets = () => {
+  secretsCollapsed = !secretsCollapsed;
+  _refreshSecretsPanel();
 };
 
 // ── Env-file secret actions ───────────────────────────────────────────────────
