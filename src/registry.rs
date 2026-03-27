@@ -126,9 +126,10 @@ impl Registry {
 
             let project_id = if let Some(id) = existing_id {
                 tx.execute(
-                    "UPDATE projects SET last_seen = ?1, framework = COALESCE(?2, framework), \
-                     start_cmd = COALESCE(?3, start_cmd) WHERE id = ?4",
-                    rusqlite::params![now, result.framework, result.start_cmd, id],
+                    "UPDATE projects SET name = ?1, last_seen = ?2, \
+                     framework = COALESCE(?3, framework), \
+                     start_cmd = COALESCE(?4, start_cmd) WHERE id = ?5",
+                    rusqlite::params![project_name, now, result.framework, result.start_cmd, id],
                 )
                 .ok();
                 id

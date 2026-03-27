@@ -169,7 +169,15 @@ function projectCard(p, index, dim = false) {
                 aria-label="${p.favorite ? 'Unfavorite' : 'Favorite'} ${p.name}">
           ${p.favorite ? '★' : '☆'}
         </button>
-        <span class="project-name">${esc(p.name)}</span>
+        ${(()=>{
+          const slash = p.name.indexOf('/');
+          if (slash === -1) return `<span class="project-name">${esc(p.name)}</span>`;
+          const parent = p.name.slice(0, slash);
+          const child  = p.name.slice(slash + 1);
+          return `<span class="project-name">
+            <span class="project-parent">${esc(parent)}/</span>${esc(child)}
+          </span>`;
+        })()}
         <span class="badge" style="background:${color};color:${textColor}">${label}</span>
       </div>
       <div class="card-bottom">

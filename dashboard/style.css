@@ -353,6 +353,11 @@ body {
   flex: 1;
 }
 
+.project-parent {
+  color: var(--text-muted);
+  font-weight: 400;
+}
+
 /* ─── Framework badge ────────────────────────────────────────────────── */
 .badge {
   display: inline-block;

@@ -5,6 +5,8 @@ use super::types::ProjectInfo;
 const MAX_WALK_DEPTH: usize = 20;
 
 /// Resolve a process cwd to a project root + framework.
+/// If the resolved root sits inside a parent project (monorepo / nested),
+/// the name is returned as "parent/child" for context.
 pub fn resolve_project_root(cwd: &Path) -> Option<ProjectInfo> {
     let cwd = cwd.canonicalize().unwrap_or_else(|_| cwd.to_path_buf());
     let home = dirs::home_dir().unwrap_or_default();
@@ -13,27 +15,41 @@ pub fn resolve_project_root(cwd: &Path) -> Option<ProjectInfo> {
         return None;
     }
 
-    let mut current = cwd.as_path();
+    let mut info = find_nearest_root(&cwd, &home)?;
+    let inner_path = std::path::PathBuf::from(&info.root);
 
+    // Walk up from the inner root's parent — if there's a containing project,
+    // prefix the name so "frontend" becomes "alloovium-deployment/frontend".
+    if let Some(parent_dir) = inner_path.parent() {
+        if parent_dir != Path::new("/") && parent_dir != home {
+            if let Some(parent_info) = find_nearest_root(parent_dir, &home) {
+                if parent_info.root != info.root {
+                    info.name = format!("{}/{}", parent_info.name, info.name);
+                }
+            }
+        }
+    }
+
+    Some(info)
+}
+
+fn find_nearest_root(start: &Path, home: &Path) -> Option<ProjectInfo> {
+    let mut current = start;
     for _ in 0..MAX_WALK_DEPTH {
         if let Some(framework) = detect_framework(current) {
-            let name = project_name(current);
             return Some(ProjectInfo {
                 root: current.to_string_lossy().to_string(),
-                name,
+                name: project_name(current),
                 framework: Some(framework),
             });
         }
-
         if current.join(".git").exists() {
-            let name = project_name(current);
             return Some(ProjectInfo {
                 root: current.to_string_lossy().to_string(),
-                name,
+                name: project_name(current),
                 framework: None,
             });
         }
-
         match current.parent() {
             Some(parent) if parent != Path::new("/") && parent != home => {
                 current = parent;
@@ -41,7 +57,6 @@ pub fn resolve_project_root(cwd: &Path) -> Option<ProjectInfo> {
             _ => break,
         }
     }
-
     None
 }
 
