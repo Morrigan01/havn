@@ -30,6 +30,7 @@ let toasts = [];
 // a full re-render on every scan cycle, which caused the 5 s flicker.
 let pendingCount = 0;
 let pendingTimer = null;
+let activeTab = 'projects'; // 'projects' | 'secrets'
 
 const $ = (sel) => document.querySelector(sel);
 const app = () => $('#app');
@@ -71,8 +72,9 @@ function render() {
 
   const identified = filtered.filter(p => p.framework || p.path);
   const unresolved = filtered.filter(p => !p.framework && !p.path);
-  const running = projects.filter(p => p.ports.length > 0).length;
+  const activeCount = projects.filter(p => p.ports.length > 0).length;
   const portCount = projects.reduce((sum, p) => sum + p.ports.length, 0);
+  const totalSecrets = envSecrets.length + storeSecrets.length;
   const scanAgo = lastScan ? timeSince(lastScan) : '...';
   const scanStale = lastScan && (Date.now() - lastScan) > 15000;
 
@@ -83,8 +85,9 @@ function render() {
         <div class="rail-brand">scanprojects</div>
         <div class="rail-stats">
           <div class="rail-stat-block">
-            <span class="rail-count">${String(running).padStart(2, '0')}</span>
-            <span class="rail-label">running</span>
+            <span class="rail-count">${String(projects.length).padStart(2, '0')}</span>
+            <span class="rail-label">projects</span>
+            <span class="rail-sublabel">${activeCount} active</span>
           </div>
           <div class="rail-stat-block">
             <span class="rail-count">${String(portCount).padStart(2, '0')}</span>
@@ -95,6 +98,14 @@ function render() {
           <span class="live-dot"></span>
           <span id="scan-time" class="${scanStale ? 'stale' : ''}">${scanAgo}</span>
         </div>
+        <nav class="rail-tabs">
+          <button class="rail-tab ${activeTab === 'projects' ? 'active' : ''}"
+                  onclick="window._setTab('projects')">Projects</button>
+          <button class="rail-tab ${activeTab === 'secrets' ? 'active' : ''}"
+                  onclick="window._setTab('secrets')">
+            Secrets${totalSecrets > 0 ? ` <span class="secrets-count">${totalSecrets}</span>` : ''}
+          </button>
+        </nav>
         <div class="rail-bottom">
           <input class="rail-search" type="text" placeholder="Filter…" value="${filter}"
                  oninput="window._filter(this.value)" aria-label="Filter projects"
@@ -106,30 +117,33 @@ function render() {
       </aside>
       <main class="board">`;
 
-  if (projects.length === 0 && connected) {
-    html += `
-      <div class="empty-state">
-        <h2>No projects detected</h2>
-        <p>Start a dev server in another terminal.</p>
-        <code>$ npm run dev</code>
-        <code>$ cargo run</code>
-        <code>$ python manage.py runserver</code>
-      </div>`;
-  } else if (!connected && projects.length === 0) {
-    html += `
-      <div class="skeleton-row"><div class="skeleton" style="width:160px;height:15px"></div><div class="skeleton" style="width:48px;height:20px"></div><div class="skeleton" style="width:60px;height:13px"></div></div>
-      <div class="skeleton-row"><div class="skeleton" style="width:120px;height:15px"></div><div class="skeleton" style="width:48px;height:20px"></div><div class="skeleton" style="width:60px;height:13px"></div></div>
-      <div class="skeleton-row"><div class="skeleton" style="width:140px;height:15px"></div><div class="skeleton" style="width:48px;height:20px"></div><div class="skeleton" style="width:60px;height:13px"></div></div>`;
+  if (activeTab === 'secrets') {
+    html += `<div id="secrets-panel">${secretsSection()}</div>`;
   } else {
-    identified.forEach((p, i) => { html += projectCard(p, i); });
-    if (unresolved.length > 0) {
-      html += `<div class="section-label" style="margin-top:16px">Unresolved Ports</div>`;
-      unresolved.forEach((p, i) => { html += projectCard(p, identified.length + i, true); });
+    if (projects.length === 0 && connected) {
+      html += `
+        <div class="empty-state">
+          <h2>No projects detected</h2>
+          <p>Start a dev server in another terminal.</p>
+          <code>$ npm run dev</code>
+          <code>$ cargo run</code>
+          <code>$ python manage.py runserver</code>
+        </div>`;
+    } else if (!connected && projects.length === 0) {
+      html += `
+        <div class="skeleton-row"><div class="skeleton" style="width:160px;height:15px"></div><div class="skeleton" style="width:48px;height:20px"></div><div class="skeleton" style="width:60px;height:13px"></div></div>
+        <div class="skeleton-row"><div class="skeleton" style="width:120px;height:15px"></div><div class="skeleton" style="width:48px;height:20px"></div><div class="skeleton" style="width:60px;height:13px"></div></div>
+        <div class="skeleton-row"><div class="skeleton" style="width:140px;height:15px"></div><div class="skeleton" style="width:48px;height:20px"></div><div class="skeleton" style="width:60px;height:13px"></div></div>`;
+    } else {
+      identified.forEach((p, i) => { html += projectCard(p, i); });
+      if (unresolved.length > 0) {
+        html += `<div class="section-label" style="margin-top:16px">Unresolved Ports</div>`;
+        unresolved.forEach((p, i) => { html += projectCard(p, identified.length + i, true); });
+      }
     }
   }
 
   html += `
-        <div id="secrets-panel">${secretsSection()}</div>
       </main>
     </div>`;
 
@@ -320,8 +334,10 @@ function secretsSection() {
 }
 
 function _refreshSecretsPanel() {
-  const panel = document.getElementById('secrets-panel');
-  if (panel) panel.innerHTML = secretsSection();
+  if (activeTab === 'secrets') {
+    const panel = document.getElementById('secrets-panel');
+    if (panel) panel.innerHTML = secretsSection();
+  }
 }
 
 // Returns [{key, occurrences: [{projectName, value}]}] for keys in 2+ projects.
@@ -377,6 +393,12 @@ async function loadSecrets() {
     // silently ignore — panel stays with previous state
   }
 }
+
+window._setTab = (tab) => {
+  activeTab = tab;
+  render();
+  if (tab === 'secrets') loadSecrets();
+};
 
 // Actions
 window._filter = (val) => { filter = val; render(); };
