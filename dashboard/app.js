@@ -5,10 +5,18 @@ const FRAMEWORK_COLORS = {
   go: '#00ADD8', django: '#092E20', fastapi: '#009688', rails: '#CC0000',
   'docker-compose': '#2496ED', fly: '#7B36ED', node: '#68A063', flask: '#000000',
 };
-const FRAMEWORK_LABELS = {
-  nextjs: 'Next', vite: 'Vite', express: 'Expr', 'create-react-app': 'React',
-  'rust-web': 'Rust', rust: 'Rust', go: 'Go', django: 'Djng', fastapi: 'Fast',
-  rails: 'Rails', 'docker-compose': 'Dock', fly: 'Fly', node: 'Node', flask: 'Flask',
+// Simple Icons slugs — https://simpleicons.org
+const FRAMEWORK_ICONS = {
+  nextjs: 'nextdotjs', vite: 'vite', express: 'express',
+  'create-react-app': 'react', 'rust-web': 'rust', rust: 'rust',
+  go: 'go', django: 'django', fastapi: 'fastapi', rails: 'rubyonrails',
+  'docker-compose': 'docker', fly: 'flydotio', node: 'nodedotjs', flask: 'flask',
+};
+const FRAMEWORK_NAMES = {
+  nextjs: 'Next.js', vite: 'Vite', express: 'Express',
+  'create-react-app': 'Create React App', 'rust-web': 'Rust (web)', rust: 'Rust',
+  go: 'Go', django: 'Django', fastapi: 'FastAPI', rails: 'Ruby on Rails',
+  'docker-compose': 'Docker Compose', fly: 'Fly.io', node: 'Node.js', flask: 'Flask',
 };
 
 let projects = [];
@@ -167,13 +175,24 @@ function render() {
   }
 }
 
+function frameworkBadge(fw) {
+  const color = FRAMEWORK_COLORS[fw] || '#888888';
+  const textColor = isLightColor(color) ? '#000' : '#fff';
+  const iconSlug = FRAMEWORK_ICONS[fw];
+  const fwName = FRAMEWORK_NAMES[fw] || fw;
+  if (iconSlug) {
+    const iconColor = textColor === '#fff' ? 'ffffff' : '000000';
+    return `<span class="badge" style="background:${color}" data-tooltip="${fwName}">
+      <img src="https://cdn.simpleicons.org/${iconSlug}/${iconColor}" width="13" height="13" alt="${fwName}" loading="lazy">
+    </span>`;
+  }
+  return `<span class="badge" style="background:${color};color:${textColor}" data-tooltip="${fwName}">${fwName}</span>`;
+}
+
 function projectCard(p, index, dim = false) {
   const fw = p.framework || '?';
-  const color = FRAMEWORK_COLORS[fw] || '#888888';
-  const label = FRAMEWORK_LABELS[fw] || '?';
   const ports = p.ports.map(port => `:${port}`).join(' ');
   const uptime = formatUptime(p.uptime_seconds || 0);
-  const textColor = isLightColor(color) ? '#000' : '#fff';
   const delay = index * 40;
   const isRestarting = restartingProjects.has(p.id);
 
@@ -195,7 +214,7 @@ function projectCard(p, index, dim = false) {
             <span class="project-parent">${esc(parent)}/</span>${esc(child)}
           </span>`;
         })()}
-        <span class="badge" style="background:${color};color:${textColor}">${label}</span>
+        ${frameworkBadge(fw)}
       </div>
       <div class="card-bottom">
         ${p.start_cmd ? `<span class="start-cmd">$ ${esc(p.start_cmd)}</span>` : ''}
