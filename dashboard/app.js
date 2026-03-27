@@ -20,6 +20,7 @@ let revealedSecrets = {};       // "key@scope" → plaintext value
 let editingSecret = null;       // "key@scope" currently being edited
 let collapsedProjects = new Set(); // project names collapsed in secrets panel
 let dismissedDuplicates = new Set(); // keys user dismissed from duplicate suggestions
+let restartingProjects = new Set(); // project ids currently restarting
 let filter = '';
 let ws = null;
 let connected = false;
@@ -174,10 +175,12 @@ function projectCard(p, index, dim = false) {
   const uptime = formatUptime(p.uptime_seconds || 0);
   const textColor = isLightColor(color) ? '#000' : '#fff';
   const delay = index * 40;
+  const isRestarting = restartingProjects.has(p.id);
 
   return `
-    <div class="card ${dim ? 'card-dim' : ''}" style="animation-delay:${delay}ms"
+    <div class="card ${dim ? 'card-dim' : ''} ${isRestarting ? 'card-restarting' : ''}" style="animation-delay:${delay}ms"
          tabindex="0" aria-label="${p.name}${ports ? ' on ' + ports : ''}">
+      ${isRestarting ? `<div class="restart-overlay"><span class="restart-spinner"></span> Restarting…</div>` : ''}
       <div class="card-top">
         <button class="fav-btn ${p.favorite ? 'active' : ''}" onclick="window._toggleFav(${p.id})"
                 aria-label="${p.favorite ? 'Unfavorite' : 'Favorite'} ${p.name}">
@@ -200,8 +203,8 @@ function projectCard(p, index, dim = false) {
         ${p.start_cmd ? `<span class="start-cmd">$ ${esc(p.start_cmd)}</span>` : ''}
         <div class="card-actions">
           ${p.ports.length > 0 ? `<button class="open-btn" onclick="window._openInBrowser(${p.ports[0]})">Open</button>` : ''}
-          ${p.start_cmd ? `<button class="restart-btn" onclick="window._restart(${p.id},'${esc(p.name)}')">Restart</button>` : ''}
-          <button class="kill-hold-btn"
+          ${p.start_cmd ? `<button class="restart-btn" ${isRestarting ? 'disabled' : ''} onclick="window._restart(${p.id},'${esc(p.name)}')">${isRestarting ? 'Restarting…' : 'Restart'}</button>` : ''}
+          <button class="kill-hold-btn" ${isRestarting ? 'disabled' : ''}
             onmousedown="window._startKillHold(this,${p.id},'${esc(p.name)}')"
             onmouseup="window._cancelKillHold(this)"
             onmouseleave="window._cancelKillHold(this)"
@@ -470,23 +473,52 @@ window._cancelKillHold = (btn) => {
   btn.classList.remove('holding');
 };
 
-window._restart = async (id, name, btn = event.target) => {
-  btn.disabled = true;
-  btn.textContent = 'Restarting...';
+window._restart = async (id, name) => {
+  restartingProjects.add(id);
+  render();
   try {
     const resp = await fetch(`/projects/${id}/restart`, { method: 'POST' });
-    if (resp.ok) {
-      showToast(`Restarting: ${name}`, 'success');
-    } else {
+    if (!resp.ok) {
       const data = await resp.json().catch(() => ({}));
       showToast(`Restart failed: ${data.message || 'No start command configured'}`, 'error');
+      restartingProjects.delete(id);
+      render();
+      return;
     }
   } catch (e) {
-    showToast(`Restart failed: ${e.message}`, 'error');
-  } finally {
-    btn.disabled = false;
-    btn.textContent = 'Restart';
+    showToast(`Restart failed: ${e.message || 'Server unreachable'}`, 'error');
+    restartingProjects.delete(id);
+    render();
+    return;
   }
+
+  // Poll until project has new PIDs (or timeout after 15s)
+  const prevPids = (projects.find(p => p.id === id)?.pids || []).join(',');
+  const deadline = Date.now() + 15000;
+  const poll = async () => {
+    if (Date.now() > deadline) {
+      showToast(`${name} restart timed out`, 'error');
+      restartingProjects.delete(id);
+      render();
+      return;
+    }
+    try {
+      const r = await fetch('/projects');
+      if (r.ok) {
+        const updated = await r.json();
+        const proj = updated.find(p => p.id === id);
+        if (proj && proj.pids.length > 0 && proj.pids.join(',') !== prevPids) {
+          projects = updated;
+          restartingProjects.delete(id);
+          showToast(`${name} is back online`, 'success');
+          render();
+          return;
+        }
+      }
+    } catch (_) { /* server may briefly be unreachable */ }
+    setTimeout(poll, 1000);
+  };
+  setTimeout(poll, 1500); // give the process a moment to spawn
 };
 
 window._openInBrowser = (port) => {

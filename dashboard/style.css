@@ -306,6 +306,29 @@ body {
 }
 .card:hover { border-color: var(--border-2); background: var(--bg-row-hover); }
 .card.card-dim { opacity: .6; }
+
+/* ─── Restarting overlay ─────────────────────────────────────────────── */
+.card.card-restarting { position: relative; pointer-events: none; opacity: .75; }
+.restart-overlay {
+  position: absolute; inset: 0; z-index: 10;
+  display: flex; align-items: center; justify-content: center; gap: 8px;
+  background: color-mix(in srgb, var(--bg-secondary) 88%, transparent);
+  border-radius: 4px;
+  font-size: 12px; font-family: var(--font-mono);
+  color: var(--accent); font-weight: 600; letter-spacing: .04em;
+  pointer-events: none;
+}
+.restart-spinner {
+  width: 12px; height: 12px;
+  border: 2px solid var(--accent-dim);
+  border-top-color: var(--accent);
+  border-radius: 50%;
+  animation: spin 600ms linear infinite;
+  flex-shrink: 0;
+}
+@keyframes spin {
+  to { transform: rotate(360deg); }
+}
 .card:hover .card-actions { opacity: 1; pointer-events: auto; }
 .card:focus-within .card-actions { opacity: 1; pointer-events: auto; }
 
