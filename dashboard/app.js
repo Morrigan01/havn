@@ -149,7 +149,21 @@ function render() {
 
   toasts.forEach(t => { html += `<div class="toast ${t.type}">${t.message}</div>`; });
 
+  // Preserve filter input focus + cursor position across the innerHTML replace.
+  const activeEl = document.activeElement;
+  const wasFilterFocused = activeEl && activeEl.getAttribute('aria-label') === 'Filter projects';
+  const selStart = wasFilterFocused ? activeEl.selectionStart : null;
+  const selEnd   = wasFilterFocused ? activeEl.selectionEnd   : null;
+
   app().innerHTML = html;
+
+  if (wasFilterFocused) {
+    const input = document.querySelector('[aria-label="Filter projects"]');
+    if (input) {
+      input.focus();
+      input.setSelectionRange(selStart, selEnd);
+    }
+  }
 }
 
 function projectCard(p, index, dim = false) {
