@@ -203,18 +203,18 @@ function projectCard(p, index, dim = false) {
           ? /* multi-process: one row per port/pid */
             p.ports.map((port, i) => {
               const pid = p.pids[i];
-              const isRowRestarting = restartingProjects.has(`${p.id}:${pid}`);
+              const isRowRestarting = restartingProjects.has(`${p.id}:${port}`);
               return `<div class="process-row">
                 <span class="ports">:${port}</span>
                 <span class="uptime">${uptime}</span>
                 <div class="card-actions">
                   <button class="open-btn" onclick="window._openInBrowser(${port})">Open</button>
-                  ${p.start_cmd ? `<button class="restart-btn" ${isRowRestarting ? 'disabled' : ''} onclick="window._restartProcess(${p.id},${pid},'${esc(p.name)}',${port})">${isRowRestarting ? 'Restarting…' : 'Restart'}</button>` : ''}
+                  ${p.start_cmd ? `<button class="restart-btn" ${isRowRestarting ? 'disabled' : ''} onclick="window._restartProcess(${p.id},${port},'${esc(p.name)}',${pid})">${isRowRestarting ? 'Restarting…' : 'Restart'}</button>` : ''}
                   <button class="kill-hold-btn" ${isRowRestarting ? 'disabled' : ''}
-                    onmousedown="window._startKillHold(this,${p.id},'${esc(p.name)}',${pid})"
+                    onmousedown="window._startKillHold(this,${p.id},'${esc(p.name)}',${port})"
                     onmouseup="window._cancelKillHold(this)"
                     onmouseleave="window._cancelKillHold(this)"
-                    ontouchstart="window._startKillHold(this,${p.id},'${esc(p.name)}',${pid})"
+                    ontouchstart="window._startKillHold(this,${p.id},'${esc(p.name)}',${port})"
                     ontouchend="window._cancelKillHold(this)">Kill</button>
                 </div>
               </div>`;
@@ -467,31 +467,21 @@ window._toggleFav = async (id) => {
 // Hold-to-kill: 600 ms hold gesture, progress bar fills, then fires.
 let _killHoldTimer = null;
 
-// pid is optional — if provided, kills only that process; otherwise kills all project processes.
-window._startKillHold = (btn, id, name, pid = null) => {
+// port is optional — if provided, kills only the process on that port; otherwise kills all.
+window._startKillHold = (btn, id, name, port = null) => {
   btn.classList.add('holding');
   _killHoldTimer = setTimeout(async () => {
     btn.classList.remove('holding');
     btn.classList.add('killing');
     btn.textContent = '…';
     try {
-      const url = pid != null
-        ? `/projects/${id}/processes/${pid}/restart` // kill-only via a dedicated kill endpoint would be ideal,
-        : `/projects/${id}/kill`;                    // but for now we use the existing kill-all or kill-port
-      // For per-pid kill, use the kill-port approach via the port number
-      const killUrl = pid != null
-        ? (() => {
-            const p = projects.find(p => p.id === id);
-            const idx = p ? p.pids.indexOf(pid) : -1;
-            return idx >= 0 ? `/kill/${p.ports[idx]}` : `/projects/${id}/kill`;
-          })()
-        : `/projects/${id}/kill`;
+      const killUrl = port != null ? `/kill/${port}` : `/projects/${id}/kill`;
       const resp = await fetch(killUrl, { method: 'POST' });
       if (resp.ok) {
         const p = projects.find(p => p.id === id);
         if (p) {
-          if (pid != null) {
-            const idx = p.pids.indexOf(pid);
+          if (port != null) {
+            const idx = p.ports.indexOf(port);
             if (idx >= 0) { p.pids.splice(idx, 1); p.ports.splice(idx, 1); }
           } else {
             p.ports = []; p.pids = [];
@@ -564,13 +554,15 @@ window._restart = async (id, name) => {
   setTimeout(poll, 1500); // give the process a moment to spawn
 };
 
-// Restart a single process (one port/pid within a multi-process project).
-window._restartProcess = async (id, pid, name, port) => {
-  const key = `${id}:${pid}`;
+// Restart a single process identified by port number within a multi-process project.
+// oldPid is the PID from the registry snapshot — used only to detect when the new
+// process has come up (different PID on same port).
+window._restartProcess = async (id, port, name, oldPid) => {
+  const key = `${id}:${port}`;
   restartingProjects.add(key);
   render();
   try {
-    const resp = await fetch(`/projects/${id}/processes/${pid}/restart`, { method: 'POST' });
+    const resp = await fetch(`/projects/${id}/processes/${port}/restart`, { method: 'POST' });
     if (!resp.ok) {
       const data = await resp.json().catch(() => ({}));
       showToast(`Restart failed: ${data.message || 'No start command configured'}`, 'error');
@@ -585,8 +577,8 @@ window._restartProcess = async (id, pid, name, port) => {
     return;
   }
 
-  // Poll until this port comes back with a new PID.
-  const deadline = Date.now() + 15000;
+  // Poll until this port comes back with a PID different from the one we killed.
+  const deadline = Date.now() + 20000;
   const poll = async () => {
     if (Date.now() > deadline) {
       showToast(`:${port} restart timed out`, 'error');
@@ -601,7 +593,8 @@ window._restartProcess = async (id, pid, name, port) => {
         const proj = updated.find(p => p.id === id);
         if (proj) {
           const idx = proj.ports.indexOf(port);
-          if (idx >= 0 && proj.pids[idx] !== pid) {
+          // Port is back and has a new PID (or the port reappeared after disappearing)
+          if (idx >= 0 && proj.pids[idx] !== oldPid) {
             projects = updated;
             restartingProjects.delete(key);
             showToast(`:${port} is back online`, 'success');
@@ -613,7 +606,7 @@ window._restartProcess = async (id, pid, name, port) => {
     } catch (_) {}
     setTimeout(poll, 1000);
   };
-  setTimeout(poll, 1500);
+  setTimeout(poll, 2000); // vite takes a moment to start
 };
 
 window._openInBrowser = (port) => {

@@ -278,11 +278,12 @@ pub async fn restart_project(
     }
 }
 
-/// Restart a single process (identified by PID) within a multi-process project.
-/// Kills only that PID, then re-spawns the project's start_cmd.
+/// Restart a single process identified by PORT within a multi-process project.
+/// Uses lsof live to find the current PID holding that port (avoids stale registry data),
+/// kills it, then re-spawns the project's start_cmd.
 pub async fn restart_process(
     State(state): State<AppState>,
-    Path((id, pid)): Path<(i64, u32)>,
+    Path((id, port)): Path<(i64, u16)>,
 ) -> Result<Json<KillResult>, (StatusCode, Json<KillResult>)> {
     let project = state.registry.get_project(id).ok_or((
         StatusCode::NOT_FOUND,
@@ -292,12 +293,12 @@ pub async fn restart_process(
         }),
     ))?;
 
-    if !project.pids.contains(&pid) {
+    if !project.ports.contains(&port) {
         return Err((
             StatusCode::NOT_FOUND,
             Json(KillResult {
                 status: "error".to_string(),
-                message: format!("PID {} not found in project '{}'", pid, project.name),
+                message: format!("Port {} not found in project '{}'", port, project.name),
             }),
         ));
     }
@@ -313,17 +314,26 @@ pub async fn restart_process(
         }),
     ))?;
 
-    let our_pid = std::process::id();
     let name = project.name.clone();
     let path = project.path.clone();
+    let our_pid = std::process::id();
 
-    if pid == our_pid {
-        // Self-restart: use detached shell (same as restart_project self-restart logic).
+    // Find the live PID(s) holding this port right now via lsof — not the registry,
+    // which can be stale by the time the user clicks Restart.
+    let live_pids = live_pids_for_port(port).await;
+
+    if live_pids.iter().any(|&p| p == our_pid) {
+        // Self-restart path (server is on this port) — detached shell.
+        let kill_cmds: String = live_pids
+            .iter()
+            .map(|&p| format!("kill -TERM {p} 2>/dev/null; sleep 0.4; kill -KILL {p} 2>/dev/null"))
+            .collect::<Vec<_>>()
+            .join("; ");
         let shell_cmd = format!(
-            "(sleep 0.3; kill -TERM {pid} 2>/dev/null; sleep 0.4; kill -KILL {pid} 2>/dev/null; sleep 0.4; cd '{dir}' && {cmd}) &",
-            pid = pid,
-            dir = path.replace('\'', "'\\''"),
-            cmd = start_cmd.replace('\'', "'\\''"),
+            "(sleep 0.3; {}; sleep 0.4; cd '{}' && {}) &",
+            kill_cmds,
+            path.replace('\'', "'\\''"),
+            start_cmd.replace('\'', "'\\''"),
         );
         std::process::Command::new("sh")
             .arg("-c").arg(&shell_cmd)
@@ -333,12 +343,23 @@ pub async fn restart_process(
             .spawn().ok();
         return Ok(Json(KillResult {
             status: "success".to_string(),
-            message: format!("Restarted process {} in '{}'", pid, name),
+            message: format!("Restarted :{} in '{}'", port, name),
         }));
     }
 
-    // Kill only the specific PID.
-    kill_pid(pid, &path).ok();
+    // Kill the live PID(s) for this port.
+    for pid in &live_pids {
+        kill_pid(*pid, &path).ok();
+    }
+    // Fall back to registry PID if lsof found nothing (process may have just exited).
+    if live_pids.is_empty() {
+        if let Some(idx) = project.ports.iter().position(|&p| p == port) {
+            if let Some(&reg_pid) = project.pids.get(idx) {
+                kill_pid(reg_pid, &path).ok();
+            }
+        }
+    }
+
     tokio::time::sleep(std::time::Duration::from_millis(500)).await;
 
     // Collect secrets and spawn.
@@ -360,10 +381,10 @@ pub async fn restart_process(
 
     match cmd.spawn() {
         Ok(_) => {
-            tracing::info!("Restarted process {} in '{}' via: {}", pid, name, start_cmd);
+            tracing::info!("Restarted :{} in '{}' via: {}", port, name, start_cmd);
             Ok(Json(KillResult {
                 status: "success".to_string(),
-                message: format!("Restarted process {} in '{}'", pid, name),
+                message: format!("Restarted :{} in '{}'", port, name),
             }))
         }
         Err(e) => Err((
@@ -373,6 +394,21 @@ pub async fn restart_process(
                 message: format!("Failed to spawn '{}': {}", start_cmd, e),
             }),
         )),
+    }
+}
+
+/// Returns the live PIDs currently listening on `port` by running lsof.
+async fn live_pids_for_port(port: u16) -> Vec<u32> {
+    let out = tokio::process::Command::new("lsof")
+        .args(["-iTCP", &format!(":{}", port), "-sTCP:LISTEN", "-t", "-n", "-P"])
+        .output()
+        .await;
+    match out {
+        Ok(o) => String::from_utf8_lossy(&o.stdout)
+            .lines()
+            .filter_map(|l| l.trim().parse::<u32>().ok())
+            .collect(),
+        Err(_) => Vec::new(),
     }
 }
 
