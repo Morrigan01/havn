@@ -192,14 +192,6 @@ pub async fn restart_project(
         }),
     ))?;
 
-    // Kill all current processes for this project.
-    for &pid in &project.pids {
-        kill_pid(pid, &project.path).ok();
-    }
-
-    // Give processes a moment to shut down before respawning.
-    tokio::time::sleep(std::time::Duration::from_millis(500)).await;
-
     // Collect secrets: global store + project-scoped store.
     let global_secrets = state.secrets.get_all(crate::secrets::GLOBAL);
     let project_secrets = state.secrets.get_all(id);
@@ -221,8 +213,54 @@ pub async fn restart_project(
     for (k, v) in &env_vars {
         cmd.env(k, v);
     }
-    match cmd.spawn()
-    {
+
+    // If any of the PIDs to kill is our own process (self-restart), we cannot
+    // kill-then-spawn: the new process would fail to bind the port because we
+    // haven't released it yet. Instead: respond immediately, then kill, then
+    // spawn after the port is free.
+    let our_pid = std::process::id();
+    let self_restart = project.pids.iter().any(|&p| p as u32 == our_pid);
+
+    if self_restart {
+        // We cannot use a tokio::spawn here: killing our own PID destroys the
+        // entire process including all async tasks, so the spawn-after-kill
+        // step would never run. Instead, delegate the whole kill+restart
+        // sequence to an external shell that will outlive this process.
+        let kill_cmds: String = project
+            .pids
+            .iter()
+            .map(|&p| format!("kill -TERM {} 2>/dev/null; sleep 0.4; kill -KILL {} 2>/dev/null", p, p))
+            .collect::<Vec<_>>()
+            .join("; ");
+        // The outer subshell (& disown) runs independently of this process.
+        let shell_cmd = format!(
+            "(sleep 0.3; {}; sleep 0.4; cd '{}' && {}) &",
+            kill_cmds,
+            project.path.replace('\'', "'\\''"),
+            start_cmd.replace('\'', "'\\''"),
+        );
+        tracing::info!("Self-restart shell: {}", shell_cmd);
+        std::process::Command::new("sh")
+            .arg("-c")
+            .arg(&shell_cmd)
+            .stdin(std::process::Stdio::null())
+            .stdout(std::process::Stdio::null())
+            .stderr(std::process::Stdio::null())
+            .spawn()
+            .ok();
+        return Ok(Json(KillResult {
+            status: "success".to_string(),
+            message: format!("Restarted: {}", name),
+        }));
+    }
+
+    // Normal restart: kill existing processes first, then spawn.
+    for &pid in &project.pids {
+        kill_pid(pid, &project.path).ok();
+    }
+    tokio::time::sleep(std::time::Duration::from_millis(500)).await;
+
+    match cmd.spawn() {
         Ok(_) => {
             tracing::info!("Restarted '{}' via: {}", name, start_cmd);
             Ok(Json(KillResult {
