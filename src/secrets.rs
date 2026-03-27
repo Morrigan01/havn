@@ -39,6 +39,19 @@ impl SecretStore {
     pub fn delete(&self, project_id: i64, key: &str) -> bool {
         self.registry.delete_secret(project_id, key)
     }
+
+    /// Decrypt and return all key-value pairs for `project_id`.
+    /// Used to inject secrets as environment variables on restart.
+    pub fn get_all(&self, project_id: i64) -> Vec<(String, String)> {
+        self.registry
+            .list_secret_keys(project_id)
+            .into_iter()
+            .filter_map(|key| {
+                let value = self.get(project_id, &key)?;
+                Some((key, value))
+            })
+            .collect()
+    }
 }
 
 fn load_or_create_master_key() -> [u8; 32] {

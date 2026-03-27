@@ -1,6 +1,7 @@
 mod api;
 mod cli;
 mod config;
+mod env_file;
 mod mcp;
 mod registry;
 mod scanner;

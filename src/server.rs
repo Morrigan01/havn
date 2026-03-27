@@ -41,6 +41,8 @@ pub async fn run(bind: String, port: u16) {
         .route("/projects/{id}", delete(api::delete_project))
         .route("/ports", get(api::get_ports))
         .route("/kill/{port}", post(api::kill_port))
+        .route("/projects/{id}/env", get(api::get_project_env))
+        .route("/projects/{id}/env/{key}", patch(api::update_project_env_key))
         .route("/secrets", get(api::list_secrets))
         .route("/secrets", post(api::set_secret))
         .route("/secrets/{key}", get(api::get_secret))

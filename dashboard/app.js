@@ -12,6 +12,12 @@ const FRAMEWORK_LABELS = {
 };
 
 let projects = [];
+// envSecrets: [{key, value, file, file_path, projectId, projectName}]
+let envSecrets = [];
+// storeSecrets: [{key, projectName: string|null}]
+let storeSecrets = [];
+let revealedSecrets = {}; // "key@scope" → plaintext value
+let editingSecret = null; // "key@scope" currently being edited
 let filter = '';
 let ws = null;
 let connected = false;
@@ -92,6 +98,9 @@ function render() {
     }
   }
 
+  // Secrets panel — populated async after render
+  html += `<div id="secrets-panel">${secretsSection()}</div>`;
+
   // Toasts
   toasts.forEach(t => {
     html += `<div class="toast ${t.type}">${t.message}</div>`;
@@ -131,6 +140,147 @@ function projectRow(p, index) {
       </div>
       ${p.start_cmd ? `<div class="start-cmd">$ ${esc(p.start_cmd)}</div>` : ''}
     </div>`;
+}
+
+function secretsSection() {
+  const projectOptions = projects
+    .map(p => `<option value="${esc(p.name)}">${esc(p.name)}</option>`)
+    .join('');
+
+  let html = `
+    <div class="section-label-row">
+      <span class="section-label">Secrets</span>
+      <form class="add-secret-form" onsubmit="window._setSecret(event)">
+        <input name="key" placeholder="KEY" required autocomplete="off" spellcheck="false">
+        <input name="value" type="password" placeholder="value" required autocomplete="new-password">
+        <select name="project">
+          <option value="">global (store)</option>
+          ${projectOptions}
+        </select>
+        <button type="submit" class="set-btn">Add to store</button>
+      </form>
+    </div>`;
+
+  const hasEnv = envSecrets.length > 0;
+  const hasStore = storeSecrets.length > 0;
+
+  if (!hasEnv && !hasStore) {
+    html += `<div class="secrets-empty">No secrets found. Start a project with a .env file or add one to the store.</div>`;
+    return html;
+  }
+
+  // ── .env file secrets grouped by project ──────────────────────────────────
+  if (hasEnv) {
+    // Group by project
+    const byProject = {};
+    envSecrets.forEach(s => {
+      const k = s.projectName;
+      if (!byProject[k]) byProject[k] = [];
+      byProject[k].push(s);
+    });
+
+    Object.entries(byProject).forEach(([projectName, entries]) => {
+      html += `<div class="section-label" style="padding-left:16px">${esc(projectName)}</div>`;
+      entries.forEach(({ key, value, file, file_path, projectId }) => {
+        const scopeKey = `${key}@env:${projectId}`;
+        const revealed = revealedSecrets[scopeKey];
+        const isEditing = editingSecret === scopeKey;
+        html += `
+          <div class="secret-row">
+            <span class="scope-tag file-tag" title="${esc(file_path)}">${esc(file)}</span>
+            <span class="secret-key">${esc(key)}</span>
+            ${isEditing
+              ? `<form class="secret-edit-form" onsubmit="window._saveEnvEdit(event,'${esc(file_path)}',${projectId},'${esc(key)}')">
+                   <input class="secret-edit-input" name="val" value="${esc(value)}" autocomplete="off" spellcheck="false">
+                   <button type="submit" class="set-btn">Save</button>
+                   <button type="button" class="reveal-btn" onclick="window._cancelEdit()">Cancel</button>
+                 </form>`
+              : `<span class="secret-value-cell ${revealed ? 'revealed' : ''}">
+                   ${revealed ? esc(value) : '••••••••'}
+                 </span>`
+            }
+            <div class="secret-actions">
+              ${!isEditing ? `
+                <button class="reveal-btn"
+                  onclick="window._toggleEnvReveal('${esc(key)}',${projectId})">
+                  ${revealed ? 'Hide' : 'Reveal'}
+                </button>
+                <button class="reveal-btn"
+                  onclick="window._editEnvSecret('${scopeKey}')">
+                  Edit
+                </button>` : ''}
+            </div>
+          </div>`;
+      });
+    });
+  }
+
+  // ── Encrypted store secrets ────────────────────────────────────────────────
+  if (hasStore) {
+    html += `<div class="section-label" style="padding-left:16px">Encrypted store</div>`;
+    storeSecrets.forEach(({ key, projectName }) => {
+      const scopeKey = `${key}@store:${projectName || ''}`;
+      const revealed = revealedSecrets[scopeKey];
+      const scopeLabel = projectName || 'global';
+      const isGlobal = !projectName;
+      html += `
+        <div class="secret-row">
+          <span class="scope-tag ${isGlobal ? 'global' : ''}">${esc(scopeLabel)}</span>
+          <span class="secret-key">${esc(key)}</span>
+          <span class="secret-value-cell ${revealed ? 'revealed' : ''}">
+            ${revealed ? esc(revealed) : '••••••••'}
+          </span>
+          <div class="secret-actions">
+            <button class="reveal-btn"
+              onclick="window._revealStoreSecret('${esc(key)}', ${projectName ? `'${esc(projectName)}'` : 'null'})">
+              ${revealed ? 'Hide' : 'Reveal'}
+            </button>
+            <button class="delete-secret-btn"
+              onclick="window._deleteSecret('${esc(key)}', ${projectName ? `'${esc(projectName)}'` : 'null'})">
+              Delete
+            </button>
+          </div>
+        </div>`;
+    });
+  }
+
+  return html;
+}
+
+function _refreshSecretsPanel() {
+  const panel = document.getElementById('secrets-panel');
+  if (panel) panel.innerHTML = secretsSection();
+}
+
+async function loadSecrets() {
+  try {
+    // Load env file secrets for every project in parallel
+    const envResults = await Promise.all(
+      projects.map(async p => {
+        const entries = await fetch(`/projects/${p.id}/env`).then(r => r.json()).catch(() => []);
+        return entries.map(e => ({ ...e, projectId: p.id, projectName: p.name }));
+      })
+    );
+    envSecrets = envResults.flat();
+
+    // Load encrypted store secrets (global + per-project)
+    const globalKeys = await fetch('/secrets').then(r => r.json()).catch(() => []);
+    const storePerProject = await Promise.all(
+      projects.map(async p => {
+        const keys = await fetch(`/secrets?project=${encodeURIComponent(p.name)}`)
+          .then(r => r.json()).catch(() => []);
+        return keys.map(k => ({ key: k, projectName: p.name }));
+      })
+    );
+    storeSecrets = [
+      ...globalKeys.map(k => ({ key: k, projectName: null })),
+      ...storePerProject.flat(),
+    ];
+
+    _refreshSecretsPanel();
+  } catch (_) {
+    // silently ignore — panel stays with previous state
+  }
 }
 
 // Actions
@@ -196,6 +346,140 @@ window._openInBrowser = (port) => {
   window.open(`http://localhost:${port}`, '_blank');
 };
 
+// ── Env-file secret actions ───────────────────────────────────────────────────
+
+window._toggleEnvReveal = (key, projectId) => {
+  const scopeKey = `${key}@env:${projectId}`;
+  if (revealedSecrets[scopeKey]) {
+    delete revealedSecrets[scopeKey];
+  } else {
+    // Value is already in envSecrets state — no round-trip needed
+    const entry = envSecrets.find(s => s.key === key && s.projectId === projectId);
+    if (entry) revealedSecrets[scopeKey] = entry.value;
+  }
+  _refreshSecretsPanel();
+};
+
+window._editEnvSecret = (scopeKey) => {
+  editingSecret = scopeKey;
+  _refreshSecretsPanel();
+  // Focus the input after render
+  requestAnimationFrame(() => {
+    const input = document.querySelector('.secret-edit-input');
+    if (input) { input.focus(); input.select(); }
+  });
+};
+
+window._cancelEdit = () => {
+  editingSecret = null;
+  _refreshSecretsPanel();
+};
+
+window._saveEnvEdit = async (event, filePath, projectId, key) => {
+  event.preventDefault();
+  const form = event.target;
+  const newValue = form.val.value;
+  const btn = form.querySelector('[type=submit]');
+  btn.disabled = true;
+  btn.textContent = 'Saving...';
+  try {
+    const resp = await fetch(
+      `/projects/${projectId}/env/${encodeURIComponent(key)}`,
+      {
+        method: 'PATCH',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({ value: newValue, file_path: filePath }),
+      }
+    );
+    if (resp.ok) {
+      // Update local state
+      const entry = envSecrets.find(s => s.key === key && s.projectId === projectId);
+      if (entry) entry.value = newValue;
+      const scopeKey = `${key}@env:${projectId}`;
+      if (revealedSecrets[scopeKey]) revealedSecrets[scopeKey] = newValue;
+      editingSecret = null;
+      _refreshSecretsPanel();
+      showToast(`Saved: ${key}`, 'success');
+    } else {
+      const data = await resp.json().catch(() => ({}));
+      showToast(`Save failed: ${data.error || 'unknown error'}`, 'error');
+      btn.disabled = false;
+      btn.textContent = 'Save';
+    }
+  } catch (e) {
+    showToast(`Save failed: ${e.message}`, 'error');
+    btn.disabled = false;
+    btn.textContent = 'Save';
+  }
+};
+
+// ── Encrypted store secret actions ────────────────────────────────────────────
+
+window._revealStoreSecret = async (key, projectName) => {
+  const scopeKey = `${key}@store:${projectName || ''}`;
+  if (revealedSecrets[scopeKey]) {
+    delete revealedSecrets[scopeKey];
+    _refreshSecretsPanel();
+    return;
+  }
+  const qs = projectName ? `?project=${encodeURIComponent(projectName)}` : '';
+  try {
+    const data = await fetch(`/secrets/${encodeURIComponent(key)}${qs}`).then(r => r.json());
+    revealedSecrets[scopeKey] = data.value;
+    _refreshSecretsPanel();
+  } catch (_) {
+    showToast('Failed to reveal secret', 'error');
+  }
+};
+
+window._deleteSecret = async (key, projectName) => {
+  const qs = projectName ? `?project=${encodeURIComponent(projectName)}` : '';
+  try {
+    const resp = await fetch(`/secrets/${encodeURIComponent(key)}${qs}`, { method: 'DELETE' });
+    if (resp.ok) {
+      delete revealedSecrets[`${key}@store:${projectName || ''}`];
+      storeSecrets = storeSecrets.filter(s => !(s.key === key && s.projectName === projectName));
+      _refreshSecretsPanel();
+      showToast(`Deleted: ${key}`, 'success');
+    } else {
+      showToast('Delete failed', 'error');
+    }
+  } catch (e) {
+    showToast(`Delete failed: ${e.message}`, 'error');
+  }
+};
+
+window._setSecret = async (event) => {
+  event.preventDefault();
+  const form = event.target;
+  const key = form.key.value.trim();
+  const value = form.value.value;
+  const project = form.project.value || undefined;
+  const btn = form.querySelector('.set-btn');
+  btn.disabled = true;
+  btn.textContent = 'Saving...';
+  try {
+    const resp = await fetch('/secrets', {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({ key, value, project }),
+    });
+    if (resp.ok) {
+      form.key.value = '';
+      form.value.value = '';
+      showToast(`Stored: ${key}`, 'success');
+      await loadSecrets();
+    } else {
+      showToast('Failed to store secret', 'error');
+    }
+  } catch (e) {
+    showToast(`Failed: ${e.message}`, 'error');
+  } finally {
+    btn.disabled = false;
+    btn.textContent = 'Add to store';
+  }
+};
+
 // Flush pending updates immediately (called by badge click or auto-timer).
 window._flushPending = () => {
   pendingCount = 0;
@@ -253,6 +537,7 @@ function connectWs() {
         pendingCount = 0;
         clearTimeout(pendingTimer);
         render();
+        loadSecrets();
         break;
       case 'project_added':
         projects.push(msg.data);

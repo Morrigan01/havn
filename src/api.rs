@@ -200,17 +200,28 @@ pub async fn restart_project(
     // Give processes a moment to shut down before respawning.
     tokio::time::sleep(std::time::Duration::from_millis(500)).await;
 
+    // Collect secrets: global store + project-scoped store.
+    let global_secrets = state.secrets.get_all(crate::secrets::GLOBAL);
+    let project_secrets = state.secrets.get_all(id);
+    // Project-scoped secrets override global ones with the same key.
+    let mut env_vars: std::collections::HashMap<String, String> =
+        global_secrets.into_iter().collect();
+    env_vars.extend(project_secrets);
+
     // Spawn the start command detached from this server process.
     let path = project.path.clone();
     let name = project.name.clone();
-    match tokio::process::Command::new("sh")
-        .arg("-c")
+    let mut cmd = tokio::process::Command::new("sh");
+    cmd.arg("-c")
         .arg(&start_cmd)
         .current_dir(&path)
         .stdin(std::process::Stdio::null())
         .stdout(std::process::Stdio::null())
-        .stderr(std::process::Stdio::null())
-        .spawn()
+        .stderr(std::process::Stdio::null());
+    for (k, v) in &env_vars {
+        cmd.env(k, v);
+    }
+    match cmd.spawn()
     {
         Ok(_) => {
             tracing::info!("Restarted '{}' via: {}", name, start_cmd);
@@ -267,6 +278,41 @@ pub async fn delete_project(
     state.registry.remove_project(id);
     let _ = state.tx.send(WsEvent::ProjectRemoved { id });
 
+    Ok(StatusCode::OK)
+}
+
+// ── Env-file endpoints ────────────────────────────────────────────────────────
+
+pub async fn get_project_env(
+    State(state): State<AppState>,
+    Path(id): Path<i64>,
+) -> Result<Json<Vec<crate::env_file::EnvEntry>>, StatusCode> {
+    let project = state.registry.get_project(id).ok_or(StatusCode::NOT_FOUND)?;
+    Ok(Json(crate::env_file::read_env_files(&project.path)))
+}
+
+#[derive(Deserialize)]
+pub struct UpdateEnvKeyBody {
+    pub value: String,
+    pub file_path: String,
+}
+
+pub async fn update_project_env_key(
+    State(state): State<AppState>,
+    Path((id, key)): Path<(i64, String)>,
+    Json(body): Json<UpdateEnvKeyBody>,
+) -> Result<StatusCode, (StatusCode, Json<serde_json::Value>)> {
+    // Verify the project exists
+    state.registry.get_project(id).ok_or((
+        StatusCode::NOT_FOUND,
+        Json(serde_json::json!({"error": "project not found"})),
+    ))?;
+    crate::env_file::update_env_key(&body.file_path, &key, &body.value).map_err(|e| {
+        (
+            StatusCode::BAD_REQUEST,
+            Json(serde_json::json!({"error": e})),
+        )
+    })?;
     Ok(StatusCode::OK)
 }
 
