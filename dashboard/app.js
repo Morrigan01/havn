@@ -34,6 +34,31 @@ let pendingTimer = null;
 const $ = (sel) => document.querySelector(sel);
 const app = () => $('#app');
 
+// ─── Theme ────────────────────────────────────────────────────────────────────
+function initTheme() {
+  const saved = localStorage.getItem('theme'); // 'light' | 'dark' | null
+  if (saved) document.documentElement.classList.add(saved);
+}
+
+function isDark() {
+  if (document.documentElement.classList.contains('dark')) return true;
+  if (document.documentElement.classList.contains('light')) return false;
+  return window.matchMedia('(prefers-color-scheme: dark)').matches;
+}
+
+window._toggleTheme = () => {
+  const root = document.documentElement;
+  const dark = isDark();
+  root.classList.remove('dark', 'light');
+  root.classList.add(dark ? 'light' : 'dark');
+  localStorage.setItem('theme', dark ? 'light' : 'dark');
+  // Update the button label without a full re-render
+  const btn = document.getElementById('theme-btn');
+  if (btn) btn.textContent = dark ? '○ Light' : '● Dark';
+};
+
+initTheme();
+
 function render() {
   pendingCount = 0;
   clearTimeout(pendingTimer);
@@ -70,9 +95,13 @@ function render() {
           <span class="live-dot"></span>
           <span id="scan-time" class="${scanStale ? 'stale' : ''}">${scanAgo}</span>
         </div>
-        <div class="rail-search">
-          <input type="text" placeholder="Filter…" value="${filter}"
-                 oninput="window._filter(this.value)" aria-label="Filter projects">
+        <div class="rail-bottom">
+          <input class="rail-search" type="text" placeholder="Filter…" value="${filter}"
+                 oninput="window._filter(this.value)" aria-label="Filter projects"
+                 style="width:100%;padding:6px 10px;border:1px solid var(--border-2);border-radius:3px;background:var(--bg-primary);color:var(--text-primary);font-family:var(--font-mono);font-size:12px;outline:none;">
+          <button id="theme-btn" class="theme-btn" onclick="window._toggleTheme()">
+            ${isDark() ? '● Dark' : '○ Light'}
+          </button>
         </div>
       </aside>
       <main class="board">`;
