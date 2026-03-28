@@ -43,13 +43,13 @@ impl Config {
 pub fn data_dir() -> PathBuf {
     dirs::data_dir()
         .unwrap_or_else(|| PathBuf::from("."))
-        .join("scanprojects")
+        .join("havn")
 }
 
 pub fn config_dir() -> PathBuf {
     dirs::config_dir()
         .unwrap_or_else(|| PathBuf::from("."))
-        .join("scanprojects")
+        .join("havn")
 }
 
 pub fn config_file_path() -> PathBuf {
@@ -61,7 +61,7 @@ pub fn db_path() -> PathBuf {
 }
 
 pub fn log_file_path() -> PathBuf {
-    data_dir().join("scanprojects.log")
+    data_dir().join("havn.log")
 }
 
 pub fn init_logging(args: &crate::cli::Cli) {
@@ -125,12 +125,12 @@ mod tests {
     #[test]
     fn test_data_dir_exists() {
         let dir = data_dir();
-        assert!(dir.to_string_lossy().contains("scanprojects"));
+        assert!(dir.to_string_lossy().contains("havn"));
     }
 
     #[test]
     fn test_config_dir_exists() {
         let dir = config_dir();
-        assert!(dir.to_string_lossy().contains("scanprojects"));
+        assert!(dir.to_string_lossy().contains("havn"));
     }
 }

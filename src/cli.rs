@@ -2,7 +2,7 @@ use clap::{Parser, Subcommand};
 use std::path::PathBuf;
 
 #[derive(Parser)]
-#[command(name = "scanprojects", about = "Map local ports to project directories")]
+#[command(name = "havn", about = "Map local ports to project directories", version)]
 pub struct Cli {
     /// Port for the dashboard server
     #[arg(short, long, default_value = "9390")]
@@ -184,7 +184,7 @@ pub async fn kill(args: &Cli, target: &str) {
                 }
             }
             Err(_) => {
-                eprintln!("Server not running. Start with `scanprojects` first.");
+                eprintln!("Server not running. Start with `havn` first.");
                 return;
             }
         }
@@ -220,7 +220,7 @@ pub async fn add(args: &Cli, path: &std::path::Path) {
             let body = resp.text().await.unwrap_or_default();
             eprintln!("Failed: {}", body);
         }
-        Err(_) => eprintln!("Server not running. Start with `scanprojects` first."),
+        Err(_) => eprintln!("Server not running. Start with `havn` first."),
     }
 }
 
@@ -229,7 +229,7 @@ pub async fn remove(args: &Cli, target: &str) {
     let resp = match reqwest::get(&projects_url).await {
         Ok(r) => r,
         Err(_) => {
-            eprintln!("Server not running. Start with `scanprojects` first.");
+            eprintln!("Server not running. Start with `havn` first.");
             return;
         }
     };
@@ -319,7 +319,7 @@ pub async fn restart(args: &Cli, target: &str) {
     let resp = match reqwest::get(&projects_url).await {
         Ok(r) => r,
         Err(_) => {
-            eprintln!("Server not running. Start with `scanprojects` first.");
+            eprintln!("Server not running. Start with `havn` first.");
             return;
         }
     };
@@ -359,7 +359,7 @@ pub async fn set_start_cmd(args: &Cli, project: &str, cmd: &str) {
     let resp = match reqwest::get(&projects_url).await {
         Ok(r) => r,
         Err(_) => {
-            eprintln!("Server not running. Start with `scanprojects` first.");
+            eprintln!("Server not running. Start with `havn` first.");
             return;
         }
     };

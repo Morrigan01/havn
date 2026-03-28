@@ -1,4 +1,4 @@
-# Design System — scanprojects
+# Design System — havn
 
 ## Product Context
 
@@ -35,7 +35,7 @@ Cohesive at every scale, strong developer-tool pedigree, tabular figures on the 
 
 | Role | Face | Weight | Size | Notes |
 |------|------|--------|------|-------|
-| Wordmark | IBM Plex Mono | 600 | 14–16px | `scanprojects` header, always lowercase |
+| Wordmark | IBM Plex Mono | 600 | 14–16px | `havn` header, always lowercase |
 | Project names | IBM Plex Mono | 500 | 13–15px | Primary visual event in every row |
 | Port / uptime data | IBM Plex Mono | 400 | 11–13px | Tabular-nums, always mono |
 | Start commands | IBM Plex Mono | 400 | 11px | `$ npm run dev` style |

@@ -3,11 +3,13 @@ use std::sync::Arc;
 
 use axum::extract::ws::{Message, WebSocket};
 use axum::extract::{State, WebSocketUpgrade};
+use axum::http::HeaderValue;
 use axum::response::{Html, IntoResponse, Response};
 use axum::routing::{delete, get, patch, post};
 use axum::Router;
 use rust_embed::Embed;
 use tokio::sync::broadcast;
+use tower_http::cors::CorsLayer;
 
 use crate::api::{self, AppState, SharedState};
 use crate::config;
@@ -25,11 +27,17 @@ pub async fn run(bind: String, port: u16) {
     let registry = Arc::new(Registry::open(&db_path));
     let secrets = Arc::new(SecretStore::new(registry.clone()));
     let (tx, _rx) = broadcast::channel::<WsEvent>(256);
+    let logs = Arc::new(crate::logs::LogStore::new());
+
+    // Rate limiter: 10 burst, refill 2/sec — prevents runaway scripts from spamming kill/restart.
+    let rate_limiter = crate::rate_limit::RateLimiter::new(10, 2.0);
 
     let state: AppState = Arc::new(SharedState {
         registry: registry.clone(),
         tx: tx.clone(),
         secrets,
+        logs,
+        rate_limiter,
     });
 
     let app = Router::new()
@@ -48,8 +56,40 @@ pub async fn run(bind: String, port: u16) {
         .route("/secrets", post(api::set_secret))
         .route("/secrets/{key}", get(api::get_secret))
         .route("/secrets/{key}", delete(api::delete_secret))
+        .route("/projects/{id}/git", get(api::get_project_git))
+        .route("/projects/{id}/health", get(api::get_project_health))
+        .route("/projects/{id}/resources", get(api::get_project_resources))
+        .route("/projects/{id}/terminal", post(api::open_terminal))
+        .route("/projects/{id}/logs", get(api::get_project_logs))
+        .route("/projects/{id}/logs", delete(api::clear_project_logs))
+        .route("/profiles", get(api::list_profiles))
+        .route("/profiles", post(api::create_profile))
+        .route("/profiles/{id}", delete(api::delete_profile_handler))
+        .route("/profiles/{id}/projects", post(api::add_project_to_profile))
+        .route("/profiles/{id}/projects/{project_id}", delete(api::remove_project_from_profile))
+        .route("/profiles/{id}/start", post(api::start_profile))
+        .route("/profiles/{id}/stop", post(api::stop_profile))
+        .route("/projects/{id}/restart-and-verify", post(api::restart_and_verify))
+        .route("/projects/{id}/errors", get(api::get_project_errors))
+        .route("/projects/{id}/effective-env", get(api::get_effective_env))
+        .route("/available-port", get(api::find_available_port))
+        .route("/system-overview", get(api::system_overview))
         .route("/ws", get(ws_handler))
         .fallback(get(serve_dashboard))
+        .layer(
+            CorsLayer::new()
+                .allow_origin([
+                    format!("http://localhost:{}", port).parse::<HeaderValue>().unwrap(),
+                    format!("http://127.0.0.1:{}", port).parse::<HeaderValue>().unwrap(),
+                ])
+                .allow_methods([
+                    axum::http::Method::GET,
+                    axum::http::Method::POST,
+                    axum::http::Method::PATCH,
+                    axum::http::Method::DELETE,
+                ])
+                .allow_headers([axum::http::header::CONTENT_TYPE]),
+        )
         .with_state(state);
 
     let addr: SocketAddr = format!("{}:{}", bind, port)
@@ -60,7 +100,7 @@ pub async fn run(bind: String, port: u16) {
     let scan_interval = config::Config::load().scan_interval_secs;
     tokio::spawn(scanner::run_loop(registry, tx, scan_interval));
 
-    tracing::info!("scanprojects running at http://{}", addr);
+    tracing::info!("havn running at http://{}", addr);
 
     // Open dashboard in browser
     let url = format!("http://localhost:{}", port);
@@ -72,7 +112,7 @@ pub async fn run(bind: String, port: u16) {
         Ok(l) => l,
         Err(e) => {
             eprintln!(
-                "Port {} is in use. Try: scanprojects --port <alt>\nError: {}",
+                "Port {} is in use. Try: havn --port <alt>\nError: {}",
                 port, e
             );
             std::process::exit(1);

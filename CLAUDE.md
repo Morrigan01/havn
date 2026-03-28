@@ -1,4 +1,4 @@
-# scanprojects — Claude Code Notes
+# havn — Claude Code Notes
 
 ## Design System
 Always read `DESIGN.md` before making any visual or UI decisions.

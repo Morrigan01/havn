@@ -1,9 +1,11 @@
-# scanprojects
+# havn
 
 **Map local ports to project directories.** CLI, dashboard, and MCP server for developers juggling multiple projects.
 
+> *havn* (Danish: harbor) — where all your dev servers dock.
+
 ```
-$ scanprojects status
+$ havn status
 PROJECT              FRAMEWORK    PORTS           UPTIME
 ------------------------------------------------------------
 ★ my-api             Express      :8080 :8081     2h 15m
@@ -16,7 +18,7 @@ PROJECT              FRAMEWORK    PORTS           UPTIME
 
 You're running 5+ dev servers. You can't remember which project is on which port. You ask your AI agent to run `lsof` for you. Again.
 
-scanprojects fixes this by continuously scanning your local ports, mapping them to project directories, detecting the framework, and giving you a dashboard to see and control everything.
+havn fixes this by continuously scanning your local ports, mapping them to project directories, detecting the framework, and giving you a dashboard to see and control everything.
 
 ## Install
 
@@ -28,14 +30,14 @@ cargo install --path .
 
 ### From GitHub releases
 
-Download the binary for your platform from [Releases](https://github.com/scanprojects/scanprojects/releases).
+Download the binary for your platform from [Releases](https://github.com/omarelloumi/havn/releases).
 
 ## Usage
 
 ### Start the dashboard
 
 ```bash
-scanprojects
+havn
 ```
 
 Opens a web dashboard at `http://localhost:9390` showing all your running projects, their ports, frameworks, and uptime. Kill processes with one click.
@@ -43,28 +45,28 @@ Opens a web dashboard at `http://localhost:9390` showing all your running projec
 ### CLI commands
 
 ```bash
-scanprojects status          # Show all projects and ports
-scanprojects kill 3000       # Kill the process on port 3000
-scanprojects kill my-api     # Kill all processes for a project
-scanprojects add ~/my-project # Register a project manually
-scanprojects remove my-api   # Unregister a project
-scanprojects config key val  # Set configuration
-scanprojects logs            # Tail server logs
-scanprojects install-service # Install as launchd/systemd service
-scanprojects mcp             # Start MCP server for AI tools
+havn status          # Show all projects and ports
+havn kill 3000       # Kill the process on port 3000
+havn kill my-api     # Kill all processes for a project
+havn add ~/my-project # Register a project manually
+havn remove my-api   # Unregister a project
+havn config key val  # Set configuration
+havn logs            # Tail server logs
+havn install-service # Install as launchd/systemd service
+havn mcp             # Start MCP server for AI tools
 ```
 
 ### Run as a background service
 
 ```bash
-scanprojects install-service
-# macOS: launchctl load ~/Library/LaunchAgents/com.scanprojects.daemon.plist
-# Linux: systemctl --user enable --now scanprojects
+havn install-service
+# macOS: launchctl load ~/Library/LaunchAgents/com.havn.daemon.plist
+# Linux: systemctl --user enable --now havn
 ```
 
 ## MCP Server (for AI tools)
 
-scanprojects includes an MCP server so AI coding tools like Claude Code and Cursor can query your dev environment.
+havn includes an MCP server so AI coding tools like Claude Code and Cursor can query and control your dev environment.
 
 ### Configure in Claude Code
 
@@ -73,8 +75,8 @@ Add to your MCP settings:
 ```json
 {
   "mcpServers": {
-    "scanprojects": {
-      "command": "scanprojects",
+    "havn": {
+      "command": "havn",
       "args": ["mcp"]
     }
   }
@@ -89,10 +91,16 @@ Add to your MCP settings:
 | `get_project` | Get details about a specific project |
 | `kill_port` | Kill the process on a specific port |
 | `find_port_for_project` | Find which port(s) a project is running on |
+| `restart_and_verify` | Restart a project and confirm it's healthy |
+| `get_errors` | Get recent errors (stderr, panics, exceptions) for a project |
+| `find_available_port` | Find the nearest free TCP port |
+| `get_system_overview` | Full snapshot of all projects and their status |
+| `get_effective_env` | Merged environment variables (.env + secrets) for a project |
+| `list_secrets` / `get_secret` / `set_secret` | Manage encrypted secrets |
 
 ## Framework detection
 
-scanprojects auto-detects frameworks by scanning project directories:
+havn auto-detects frameworks by scanning project directories:
 
 | Framework | Detection |
 |-----------|-----------|
@@ -110,13 +118,13 @@ scanprojects auto-detects frameworks by scanning project directories:
 ## Configuration
 
 Config is stored in platform-standard directories:
-- macOS: `~/Library/Application Support/scanprojects/config.json`
-- Linux: `~/.config/scanprojects/config.json`
+- macOS: `~/Library/Application Support/havn/config.json`
+- Linux: `~/.config/havn/config.json`
 
 ```bash
-scanprojects config dashboard_port 9390
-scanprojects config scan_interval 5
-scanprojects config log_level info
+havn config dashboard_port 9390
+havn config scan_interval 5
+havn config log_level info
 ```
 
 ## How it works
@@ -125,8 +133,37 @@ scanprojects config log_level info
 2. **Project resolver** walks up from each process's working directory to find project roots (package.json, Cargo.toml, .git, etc.)
 3. **Framework detector** parses project files to identify the framework
 4. **Registry** (SQLite) persists project history across restarts
-5. **Dashboard** (Preact SPA) shows everything in real-time via WebSocket
+5. **Dashboard** shows everything in real-time via WebSocket
 6. **MCP server** (rmcp) lets AI tools query and control your dev environment
+
+## Security
+
+havn is designed for **single-user local development machines**. Understanding its security model is important before using it.
+
+### What's protected
+
+- **Secrets at rest** — encrypted with AES-256-GCM. The master key is stored with `0600` permissions (owner-read-only).
+- **CORS** — the API rejects cross-origin requests, preventing malicious websites from calling your local API.
+- **Localhost binding** — the server binds to `127.0.0.1` by default, not exposed to the network.
+- **Rate limiting** — destructive endpoints (kill, restart) are rate-limited to prevent abuse.
+- **Command validation** — start commands are checked against dangerous shell patterns.
+
+### Assumptions and limitations
+
+- **No authentication** — anyone who can reach `localhost:9390` can use the API. This is safe on single-user machines but not on shared systems.
+- **No HTTPS** — traffic is unencrypted. This is acceptable for localhost-only usage.
+- **Start commands run as your user** — the `restart` feature executes shell commands with your permissions. Only set start commands you trust.
+- **macOS optimized** — kqueue-based process monitoring is macOS-native. Linux falls back to polling.
+
+### Recommendations
+
+- Do **not** bind to `0.0.0.0` in untrusted environments (use the default `127.0.0.1`).
+- If running on a shared machine, firewall port 9390 to your user.
+- Review start commands before setting them via the dashboard.
+
+## Contributing
+
+Contributions are welcome! Please open an issue or pull request.
 
 ## License
 

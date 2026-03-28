@@ -10,20 +10,20 @@ pub fn install() {
     #[cfg(not(any(target_os = "macos", target_os = "linux")))]
     {
         eprintln!("Service installation is not supported on this platform.");
-        eprintln!("Run `scanprojects` in a terminal or use your OS task scheduler.");
+        eprintln!("Run `havn` in a terminal or use your OS task scheduler.");
     }
 }
 
 #[cfg(target_os = "macos")]
 fn install_launchd() {
-    let binary = std::env::current_exe().unwrap_or_else(|_| PathBuf::from("scanprojects"));
-    let plist_name = "com.scanprojects.daemon";
+    let binary = std::env::current_exe().unwrap_or_else(|_| PathBuf::from("havn"));
+    let plist_name = "com.havn.daemon";
     let plist_path = dirs::home_dir()
         .unwrap()
         .join("Library/LaunchAgents")
         .join(format!("{}.plist", plist_name));
 
-    let log_path = crate::config::data_dir().join("scanprojects.log");
+    let log_path = crate::config::data_dir().join("havn.log");
 
     let plist = format!(
         r#"<?xml version="1.0" encoding="UTF-8"?>
@@ -73,8 +73,8 @@ fn install_launchd() {
 
 #[cfg(target_os = "linux")]
 fn install_systemd() {
-    let binary = std::env::current_exe().unwrap_or_else(|_| PathBuf::from("scanprojects"));
-    let unit_name = "scanprojects";
+    let binary = std::env::current_exe().unwrap_or_else(|_| PathBuf::from("havn"));
+    let unit_name = "havn";
     let unit_path = dirs::home_dir()
         .unwrap()
         .join(".config/systemd/user")
@@ -82,7 +82,7 @@ fn install_systemd() {
 
     let unit = format!(
         r#"[Unit]
-Description=scanprojects — local port manager
+Description=havn — local port manager
 After=network.target
 
 [Service]

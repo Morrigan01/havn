@@ -8,6 +8,14 @@ use crate::scanner::types::ScanResult;
 use crate::ws::WsEvent;
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct Profile {
+    pub id: i64,
+    pub name: String,
+    pub project_ids: Vec<i64>,
+    pub created_at: String,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct Project {
     pub id: i64,
     pub path: String,
@@ -95,6 +103,18 @@ impl Registry {
                 nonce      BLOB    NOT NULL,
                 ciphertext BLOB    NOT NULL,
                 UNIQUE(project_id, key)
+            );
+
+            CREATE TABLE IF NOT EXISTS profiles (
+                id         INTEGER PRIMARY KEY,
+                name       TEXT NOT NULL UNIQUE,
+                created_at TEXT NOT NULL
+            );
+
+            CREATE TABLE IF NOT EXISTS profile_projects (
+                profile_id INTEGER NOT NULL REFERENCES profiles(id) ON DELETE CASCADE,
+                project_id INTEGER NOT NULL REFERENCES projects(id) ON DELETE CASCADE,
+                PRIMARY KEY (profile_id, project_id)
             );
             ",
         )?;
@@ -407,6 +427,68 @@ impl Registry {
         self.get_all_projects()
             .into_iter()
             .find(|p| p.name == name || p.path == name)
+    }
+
+    // ── Profiles ──────────────────────────────────────────────────────────────
+
+    pub fn create_profile(&self, name: &str) -> Result<i64, String> {
+        let conn = self.conn.lock().unwrap();
+        let now = chrono::Utc::now().to_rfc3339();
+        conn.execute(
+            "INSERT INTO profiles (name, created_at) VALUES (?1, ?2)",
+            rusqlite::params![name, now],
+        ).map_err(|e| e.to_string())?;
+        Ok(conn.last_insert_rowid())
+    }
+
+    pub fn list_profiles(&self) -> Vec<Profile> {
+        let conn = self.conn.lock().unwrap();
+        let mut stmt = match conn.prepare(
+            "SELECT id, name, created_at FROM profiles ORDER BY created_at"
+        ) {
+            Ok(s) => s,
+            Err(_) => return Vec::new(),
+        };
+        let profiles: Vec<(i64, String, String)> = stmt
+            .query_map([], |row| Ok((row.get(0)?, row.get(1)?, row.get(2)?)))
+            .unwrap()
+            .filter_map(|r| r.ok())
+            .collect();
+
+        profiles.into_iter().map(|(id, name, created_at)| {
+            let project_ids = conn
+                .prepare("SELECT project_id FROM profile_projects WHERE profile_id = ?1")
+                .ok()
+                .and_then(|mut s| {
+                    s.query_map([id], |r| r.get::<_, i64>(0)).ok().map(|rows| {
+                        rows.filter_map(|r| r.ok()).collect()
+                    })
+                })
+                .unwrap_or_default();
+            Profile { id, name, project_ids, created_at }
+        }).collect()
+    }
+
+    pub fn delete_profile(&self, id: i64) {
+        let conn = self.conn.lock().unwrap();
+        conn.execute("DELETE FROM profile_projects WHERE profile_id = ?1", [id]).ok();
+        conn.execute("DELETE FROM profiles WHERE id = ?1", [id]).ok();
+    }
+
+    pub fn add_project_to_profile(&self, profile_id: i64, project_id: i64) {
+        let conn = self.conn.lock().unwrap();
+        conn.execute(
+            "INSERT OR IGNORE INTO profile_projects (profile_id, project_id) VALUES (?1, ?2)",
+            rusqlite::params![profile_id, project_id],
+        ).ok();
+    }
+
+    pub fn remove_project_from_profile(&self, profile_id: i64, project_id: i64) {
+        let conn = self.conn.lock().unwrap();
+        conn.execute(
+            "DELETE FROM profile_projects WHERE profile_id = ?1 AND project_id = ?2",
+            rusqlite::params![profile_id, project_id],
+        ).ok();
     }
 }
 

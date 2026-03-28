@@ -1,4 +1,4 @@
-// scanprojects dashboard — vanilla JS, no build step
+// havn dashboard — vanilla JS, no build step
 const FRAMEWORK_COLORS = {
   nextjs: '#000000', vite: '#646CFF', express: '#68A063',
   'create-react-app': '#61DAFB', 'rust-web': '#DEA584', rust: '#DEA584',
@@ -39,7 +39,14 @@ let toasts = [];
 // a full re-render on every scan cycle, which caused the 5 s flicker.
 let pendingCount = 0;
 let pendingTimer = null;
-let activeTab = 'projects'; // 'projects' | 'secrets'
+let activeTab = 'projects'; // 'projects' | 'secrets' | 'profiles'
+
+// ─── Detail panel ──────────────────────────────────────────────────────────
+let selectedProjectId = null;
+let panelData = {};  // id → { git, health, resources, logs }
+
+// ─── Profiles ──────────────────────────────────────────────────────────────
+let profiles = [];
 
 const $ = (sel) => document.querySelector(sel);
 const app = () => $('#app');
@@ -91,7 +98,7 @@ function render() {
     ${!connected ? '<div class="banner warning">Connection lost. Reconnecting...</div>' : ''}
     <div class="layout">
       <aside class="rail">
-        <div class="rail-brand">scanprojects</div>
+        <div class="rail-brand">havn</div>
         <div class="rail-stats">
           <div class="rail-stat-block">
             <span class="rail-count">${String(projects.length).padStart(2, '0')}</span>
@@ -114,6 +121,8 @@ function render() {
                   onclick="window._setTab('secrets')">
             Secrets${totalSecrets > 0 ? ` <span class="secrets-count">${totalSecrets}</span>` : ''}
           </button>
+          <button class="rail-tab ${activeTab === 'profiles' ? 'active' : ''}"
+                  onclick="window._setTab('profiles')">Profiles${profiles.length > 0 ? ` <span class="secrets-count">${profiles.length}</span>` : ''}</button>
         </nav>
         <div class="rail-bottom">
           <input class="rail-search" type="text" placeholder="Filter…" value="${filter}"
@@ -124,10 +133,13 @@ function render() {
           </button>
         </div>
       </aside>
+      <div class="content-area${selectedProjectId ? ' panel-open' : ''}">
       <main class="board">`;
 
   if (activeTab === 'secrets') {
     html += `<div id="secrets-panel">${secretsSection()}</div>`;
+  } else if (activeTab === 'profiles') {
+    html += profilesBoard();
   } else {
     if (projects.length === 0 && connected) {
       html += `
@@ -152,8 +164,11 @@ function render() {
     }
   }
 
+  const selectedProject = selectedProjectId ? projects.find(p => p.id === selectedProjectId) : null;
   html += `
       </main>
+      ${selectedProject ? renderDetailPanel(selectedProject) : ''}
+      </div>
     </div>`;
 
   toasts.forEach(t => { html += `<div class="toast ${t.type}">${t.message}</div>`; });
@@ -197,10 +212,10 @@ function projectCard(p, index, dim = false) {
   const isRestarting = restartingProjects.has(p.id);
 
   return `
-    <div class="card ${dim ? 'card-dim' : ''} ${isRestarting ? 'card-restarting' : ''}" style="animation-delay:${delay}ms"
+    <div class="card ${dim ? 'card-dim' : ''} ${isRestarting ? 'card-restarting' : ''} ${selectedProjectId === p.id ? 'card-selected' : ''}" style="animation-delay:${delay}ms"
          tabindex="0" aria-label="${p.name}${ports ? ' on ' + ports : ''}">
       ${isRestarting ? `<div class="restart-overlay"><span class="restart-spinner"></span> Restarting…</div>` : ''}
-      <div class="card-top">
+      <div class="card-top" onclick="window._selectProject(${p.id})" style="cursor:pointer">
         <button class="fav-btn ${p.favorite ? 'active' : ''}" onclick="window._toggleFav(${p.id})"
                 aria-label="${p.favorite ? 'Unfavorite' : 'Favorite'} ${p.name}">
           ${p.favorite ? '★' : '☆'}
@@ -464,8 +479,10 @@ async function loadSecrets() {
 
 window._setTab = (tab) => {
   activeTab = tab;
+  selectedProjectId = null;
   render();
   if (tab === 'secrets') loadSecrets();
+  if (tab === 'profiles') loadProfiles();
 };
 
 // Actions
@@ -854,6 +871,7 @@ function connectWs() {
         clearTimeout(pendingTimer);
         render();
         loadSecrets();
+        loadProfiles();
         break;
       case 'project_added':
         projects.push(msg.data);
@@ -883,6 +901,370 @@ function connectWs() {
 
   ws.onerror = () => { ws.close(); };
 }
+
+// ─── Detail Panel ─────────────────────────────────────────────────────────────
+
+function renderDetailPanel(p) {
+  const d = panelData[p.id] || {};
+  return `
+    <aside class="detail-panel">
+      <div class="panel-header">
+        <span class="panel-title">${esc(p.name)}</span>
+        <button class="panel-close-btn" onclick="window._closePanel()">✕</button>
+      </div>
+      <div class="panel-body">
+        <div class="panel-section">
+          <div class="panel-section-title">Path</div>
+          <div class="panel-path">${esc(p.path || '—')}</div>
+        </div>
+        ${renderGitSection(p.id, d.git)}
+        ${renderHealthSection(p.id, d.health)}
+        ${renderResourcesSection(p.id, d.resources)}
+        <div class="panel-section">
+          <div class="panel-section-title">Terminal</div>
+          <button class="panel-action-btn" onclick="window._openTerminal(${p.id})">Open in Terminal</button>
+        </div>
+        ${renderLogsSection(p.id, d.logs)}
+      </div>
+    </aside>`;
+}
+
+function renderGitSection(id, git) {
+  const refreshBtn = `<button class="panel-refresh-btn" onclick="event.stopPropagation();window._fetchPanelData(${id},'git')">↻</button>`;
+  if (!git) {
+    return `<div class="panel-section">
+      <div class="panel-section-title">Git ${refreshBtn}</div>
+      <div class="panel-loading">Loading…</div>
+    </div>`;
+  }
+  if (git.error) {
+    return `<div class="panel-section">
+      <div class="panel-section-title">Git ${refreshBtn}</div>
+      <div class="panel-muted">Not a git repo</div>
+    </div>`;
+  }
+  return `<div class="panel-section">
+    <div class="panel-section-title">Git ${refreshBtn}</div>
+    <div class="panel-git-row">
+      <span class="panel-git-branch">⎇ ${esc(git.branch || 'unknown')}</span>
+      ${git.dirty ? '<span class="panel-git-dirty">● dirty</span>' : '<span class="panel-git-clean">✓ clean</span>'}
+    </div>
+    ${(git.ahead > 0 || git.behind > 0) ? `<div class="panel-git-ahead-behind">
+      ${git.ahead > 0 ? `<span class="panel-git-ahead">↑${git.ahead}</span>` : ''}
+      ${git.behind > 0 ? `<span class="panel-git-behind">↓${git.behind}</span>` : ''}
+    </div>` : ''}
+  </div>`;
+}
+
+function renderHealthSection(id, health) {
+  const refreshBtn = `<button class="panel-refresh-btn" onclick="event.stopPropagation();window._fetchPanelData(${id},'health')">↻</button>`;
+  if (!health) {
+    return `<div class="panel-section">
+      <div class="panel-section-title">Health ${refreshBtn}</div>
+      <div class="panel-loading">Loading…</div>
+    </div>`;
+  }
+  const checks = Array.isArray(health) ? health : [];
+  const rows = checks.map(c => {
+    const ok = c.status === 'up';
+    return `
+    <div class="panel-health-row">
+      <span class="panel-health-dot ${ok ? 'ok' : 'fail'}"></span>
+      <span class="panel-health-port">:${c.port}</span>
+      <span class="panel-health-status">${esc(c.status)}${c.status_code ? ' (' + c.status_code + ')' : ''}</span>
+      ${c.latency_ms != null ? `<span class="panel-health-latency">${c.latency_ms}ms</span>` : ''}
+    </div>`;
+  }).join('');
+  return `<div class="panel-section">
+    <div class="panel-section-title">Health ${refreshBtn}</div>
+    ${rows || '<div class="panel-muted">No ports</div>'}
+  </div>`;
+}
+
+function renderResourcesSection(id, resources) {
+  const refreshBtn = `<button class="panel-refresh-btn" onclick="event.stopPropagation();window._fetchPanelData(${id},'resources')">↻</button>`;
+  if (!resources) {
+    return `<div class="panel-section">
+      <div class="panel-section-title">Resources ${refreshBtn}</div>
+      <div class="panel-loading">Loading…</div>
+    </div>`;
+  }
+  const procs = Array.isArray(resources) ? resources : [];
+  const rows = procs.map(r => {
+    const memMb = r.mem_rss_kb != null ? (r.mem_rss_kb / 1024).toFixed(1) : null;
+    return `
+    <div class="panel-resource-row">
+      <span class="panel-resource-pid">pid ${r.pid}</span>
+      <span class="panel-resource-cpu">${r.cpu_percent != null ? r.cpu_percent.toFixed(1) + '% cpu' : '—'}</span>
+      <span class="panel-resource-mem">${memMb != null ? memMb + ' MB' : '—'}</span>
+    </div>`;
+  }).join('');
+  return `<div class="panel-section">
+    <div class="panel-section-title">Resources ${refreshBtn}</div>
+    ${rows || '<div class="panel-muted">No processes</div>'}
+  </div>`;
+}
+
+function renderLogsSection(id, logs) {
+  const lines = logs || [];
+  return `<div class="panel-section panel-logs-section">
+    <div class="panel-section-title" style="display:flex;align-items:center;justify-content:space-between">
+      <span>Logs</span>
+      <span style="display:flex;gap:6px">
+        <button class="panel-refresh-btn" onclick="event.stopPropagation();window._refreshLogs(${id})">↻</button>
+        <button class="panel-refresh-btn" onclick="event.stopPropagation();window._clearLogs(${id})">Clear</button>
+      </span>
+    </div>
+    <div class="panel-log-box" id="panel-log-box-${id}">
+      ${lines.length === 0
+        ? '<div class="panel-muted">No logs yet. Logs appear when a process is restarted via havn.</div>'
+        : lines.map(l => `<div class="log-line">
+            <span class="log-ts">${esc((l.ts || '').slice(11, 19))}</span>
+            <span class="log-stream ${l.stream === 'stderr' ? 'stderr' : ''}">${l.stream === 'stderr' ? 'err' : 'out'}</span>
+            <span class="log-text">${esc(l.text)}</span>
+          </div>`).join('')
+      }
+    </div>
+  </div>`;
+}
+
+window._selectProject = (id) => {
+  if (selectedProjectId === id) {
+    selectedProjectId = null;
+    render();
+    return;
+  }
+  selectedProjectId = id;
+  if (!panelData[id]) panelData[id] = {};
+  render();
+  window._fetchPanelData(id, 'git');
+  window._fetchPanelData(id, 'health');
+  window._fetchPanelData(id, 'resources');
+  window._refreshLogs(id);
+};
+
+window._closePanel = () => {
+  selectedProjectId = null;
+  render();
+};
+
+window._fetchPanelData = async (id, section) => {
+  try {
+    const resp = await fetch(`/projects/${id}/${section}`);
+    if (!panelData[id]) panelData[id] = {};
+    if (!resp.ok) {
+      panelData[id][section] = { error: `HTTP ${resp.status}` };
+    } else {
+      panelData[id][section] = await resp.json();
+    }
+    if (selectedProjectId === id) render();
+  } catch (e) {
+    if (!panelData[id]) panelData[id] = {};
+    panelData[id][section] = { error: e.message };
+    if (selectedProjectId === id) render();
+  }
+};
+
+window._openTerminal = async (id) => {
+  try {
+    const resp = await fetch(`/projects/${id}/terminal`, { method: 'POST' });
+    if (!resp.ok) showToast('Failed to open terminal', 'error');
+  } catch (e) {
+    showToast(`Terminal failed: ${e.message}`, 'error');
+  }
+};
+
+window._refreshLogs = async (id) => {
+  try {
+    const logs = await fetch(`/projects/${id}/logs?n=200`).then(r => r.json());
+    if (!panelData[id]) panelData[id] = {};
+    panelData[id].logs = logs;
+    if (selectedProjectId === id) {
+      render();
+      requestAnimationFrame(() => {
+        const box = document.getElementById(`panel-log-box-${id}`);
+        if (box) box.scrollTop = box.scrollHeight;
+      });
+    }
+  } catch (_) {}
+};
+
+window._clearLogs = async (id) => {
+  try {
+    await fetch(`/projects/${id}/logs`, { method: 'DELETE' });
+    if (panelData[id]) panelData[id].logs = [];
+    if (selectedProjectId === id) render();
+  } catch (e) {
+    showToast(`Clear failed: ${e.message}`, 'error');
+  }
+};
+
+// ─── Profiles ─────────────────────────────────────────────────────────────────
+
+async function loadProfiles() {
+  try {
+    profiles = await fetch('/profiles').then(r => r.json());
+    if (activeTab === 'profiles') render();
+  } catch (_) {}
+}
+
+function profilesBoard() {
+  let html = `
+    <div class="profiles-header">
+      <span class="section-label" style="padding:0">Profiles</span>
+      <form class="add-profile-form" onsubmit="window._createProfile(event)">
+        <input name="name" placeholder="Profile name…" required autocomplete="off">
+        <button type="submit" class="set-btn">Create</button>
+      </form>
+    </div>`;
+
+  if (profiles.length === 0) {
+    html += `<div class="panel-muted" style="padding:24px 16px">No profiles yet. Create one to group projects together.</div>`;
+    return html;
+  }
+
+  profiles.forEach(profile => { html += renderProfileCard(profile); });
+  return html;
+}
+
+function renderProfileCard(profile) {
+  const profileProjects = profile.project_ids
+    .map(id => projects.find(p => p.id === id))
+    .filter(Boolean);
+
+  const allRunning = profileProjects.length > 0 && profileProjects.every(p => p.ports.length > 0);
+
+  return `
+    <div class="profile-card">
+      <div class="profile-card-header">
+        <span class="profile-name">${esc(profile.name)}</span>
+        <div class="profile-header-actions">
+          ${profileProjects.length > 0
+            ? (allRunning
+                ? `<button class="restart-btn" onclick="window._stopProfile(${profile.id})">Stop All</button>`
+                : `<button class="open-btn" onclick="window._startProfile(${profile.id})">Start All</button>`)
+            : ''
+          }
+          <button class="profile-delete-btn" onclick="window._deleteProfile(${profile.id})">Delete</button>
+        </div>
+      </div>
+      <div class="profile-projects-list">
+        ${profileProjects.length === 0
+          ? `<div class="panel-muted" style="padding:6px 0">No projects in this profile.</div>`
+          : profileProjects.map(p => `
+            <div class="profile-project-row">
+              <span class="profile-project-dot ${p.ports.length > 0 ? 'live' : 'dead'}"></span>
+              <span class="profile-project-name">${esc(p.name)}</span>
+              <span class="profile-project-ports">${p.ports.map(port => `:${port}`).join(' ')}</span>
+              <button class="profile-remove-btn" onclick="window._removeFromProfile(${profile.id},${p.id})">✕</button>
+            </div>`).join('')
+        }
+        <div class="profile-add-row">
+          <select class="profile-add-select" id="profile-add-select-${profile.id}">
+            <option value="">Add project…</option>
+            ${projects
+              .filter(p => !profile.project_ids.includes(p.id))
+              .map(p => `<option value="${p.id}">${esc(p.name)}</option>`)
+              .join('')}
+          </select>
+          <button class="open-btn" style="font-size:11px;padding:3px 8px" onclick="window._addToProfile(${profile.id})">Add</button>
+        </div>
+      </div>
+    </div>`;
+}
+
+window._createProfile = async (event) => {
+  event.preventDefault();
+  const form = event.target;
+  const name = form.name.value.trim();
+  if (!name) return;
+  const btn = form.querySelector('.set-btn');
+  btn.disabled = true;
+  try {
+    const resp = await fetch('/profiles', {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({ name }),
+    });
+    if (resp.ok) {
+      form.name.value = '';
+      await loadProfiles();
+    } else {
+      showToast('Failed to create profile', 'error');
+    }
+  } catch (e) {
+    showToast(`Failed: ${e.message}`, 'error');
+  } finally {
+    btn.disabled = false;
+  }
+};
+
+window._deleteProfile = async (id) => {
+  if (!confirm('Delete this profile?')) return;
+  try {
+    const resp = await fetch(`/profiles/${id}`, { method: 'DELETE' });
+    if (resp.ok) {
+      await loadProfiles();
+    } else {
+      showToast('Failed to delete profile', 'error');
+    }
+  } catch (e) {
+    showToast(`Failed: ${e.message}`, 'error');
+  }
+};
+
+window._addToProfile = async (profileId) => {
+  const sel = document.getElementById(`profile-add-select-${profileId}`);
+  const projectId = parseInt(sel?.value);
+  if (!projectId) return;
+  try {
+    const resp = await fetch(`/profiles/${profileId}/projects`, {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({ project_id: projectId }),
+    });
+    if (resp.ok) {
+      await loadProfiles();
+    } else {
+      showToast('Failed to add project', 'error');
+    }
+  } catch (e) {
+    showToast(`Failed: ${e.message}`, 'error');
+  }
+};
+
+window._removeFromProfile = async (profileId, projectId) => {
+  try {
+    const resp = await fetch(`/profiles/${profileId}/projects/${projectId}`, { method: 'DELETE' });
+    if (resp.ok) {
+      await loadProfiles();
+    } else {
+      showToast('Failed to remove project', 'error');
+    }
+  } catch (e) {
+    showToast(`Failed: ${e.message}`, 'error');
+  }
+};
+
+window._startProfile = async (id) => {
+  try {
+    const resp = await fetch(`/profiles/${id}/start`, { method: 'POST' });
+    if (!resp.ok) showToast('Failed to start profile', 'error');
+    else showToast('Profile started', 'success');
+  } catch (e) {
+    showToast(`Failed: ${e.message}`, 'error');
+  }
+};
+
+window._stopProfile = async (id) => {
+  try {
+    const resp = await fetch(`/profiles/${id}/stop`, { method: 'POST' });
+    if (!resp.ok) showToast('Failed to stop profile', 'error');
+    else showToast('Profile stopped', 'success');
+  } catch (e) {
+    showToast(`Failed: ${e.message}`, 'error');
+  }
+};
 
 // Helpers
 function formatUptime(seconds) {

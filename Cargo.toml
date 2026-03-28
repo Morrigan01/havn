@@ -1,10 +1,10 @@
 [package]
-name = "scanprojects"
+name = "havn"
 version = "0.1.0"
 edition = "2021"
 description = "Map local ports to project directories — CLI, dashboard, and MCP server"
 license = "MIT"
-repository = "https://github.com/scanprojects/scanprojects"
+repository = "https://github.com/omarelloumi/havn"
 
 [dependencies]
 axum = { version = "0.8", features = ["ws"] }
@@ -29,6 +29,7 @@ schemars = "1.0"
 libc = "0.2"
 aes-gcm = "0.10"
 rand = "0.8"
+futures = "0.3"
 
 [dev-dependencies]
 reqwest = { version = "0.12", features = ["json"] }

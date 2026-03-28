@@ -66,6 +66,35 @@ pub struct SetSecretParams {
     pub project: Option<String>,
 }
 
+#[derive(Serialize, Deserialize, JsonSchema)]
+pub struct RestartAndVerifyParams {
+    /// Project name to restart and verify
+    pub name: String,
+}
+
+#[derive(Serialize, Deserialize, JsonSchema)]
+pub struct GetErrorsParams {
+    /// Project name
+    pub name: String,
+    /// Maximum number of error lines to return (default: 20)
+    pub lines: Option<usize>,
+}
+
+#[derive(Serialize, Deserialize, JsonSchema)]
+pub struct FindAvailablePortParams {
+    /// Preferred starting port (default: 3000)
+    pub preferred: Option<u16>,
+}
+
+#[derive(Serialize, Deserialize, JsonSchema)]
+pub struct SystemOverviewParams {}
+
+#[derive(Serialize, Deserialize, JsonSchema)]
+pub struct GetEffectiveEnvParams {
+    /// Project name
+    pub name: String,
+}
+
 #[tool_router]
 impl McpServer {
     pub fn new(api_url: String) -> Self {
@@ -83,7 +112,7 @@ impl McpServer {
                 Ok(body) => body,
                 Err(e) => format!("Error reading response: {}", e),
             },
-            Err(_) => "scanprojects server not running. Start with `scanprojects` or `scanprojects install-service`.".to_string(),
+            Err(_) => "havn server not running. Start with `havn` or `havn install-service`.".to_string(),
         }
     }
 
@@ -92,7 +121,7 @@ impl McpServer {
     async fn get_project(&self, params: Parameters<GetProjectParams>) -> String {
         let projects_resp = match reqwest::get(&format!("{}/projects", self.api_url)).await {
             Ok(r) => r,
-            Err(_) => return "scanprojects server not running.".to_string(),
+            Err(_) => return "havn server not running.".to_string(),
         };
 
         let projects: Vec<serde_json::Value> = match projects_resp.json().await {
@@ -121,7 +150,7 @@ impl McpServer {
                 Ok(body) => body,
                 Err(e) => format!("Error: {}", e),
             },
-            Err(_) => "scanprojects server not running.".to_string(),
+            Err(_) => "havn server not running.".to_string(),
         }
     }
 
@@ -133,7 +162,7 @@ impl McpServer {
     async fn restart_project(&self, params: Parameters<RestartProjectParams>) -> String {
         let projects_resp = match reqwest::get(&format!("{}/projects", self.api_url)).await {
             Ok(r) => r,
-            Err(_) => return "scanprojects server not running.".to_string(),
+            Err(_) => return "havn server not running.".to_string(),
         };
         let projects: Vec<serde_json::Value> = match projects_resp.json().await {
             Ok(p) => p,
@@ -171,7 +200,7 @@ impl McpServer {
         }
         match reqwest::get(&url).await {
             Ok(resp) => resp.text().await.unwrap_or_default(),
-            Err(_) => "scanprojects server not running.".to_string(),
+            Err(_) => "havn server not running.".to_string(),
         }
     }
 
@@ -198,7 +227,7 @@ impl McpServer {
                 format!("Secret '{}' not found.", params.0.key)
             }
             Ok(_) => "Error retrieving secret.".to_string(),
-            Err(_) => "scanprojects server not running.".to_string(),
+            Err(_) => "havn server not running.".to_string(),
         }
     }
 
@@ -226,7 +255,7 @@ impl McpServer {
                 format!("Secret '{}' stored.", params.0.key)
             }
             Ok(resp) => resp.text().await.unwrap_or_default(),
-            Err(_) => "scanprojects server not running.".to_string(),
+            Err(_) => "havn server not running.".to_string(),
         }
     }
 
@@ -238,7 +267,7 @@ impl McpServer {
     async fn find_port_for_project(&self, params: Parameters<FindPortParams>) -> String {
         let projects_resp = match reqwest::get(&format!("{}/projects", self.api_url)).await {
             Ok(r) => r,
-            Err(_) => return "scanprojects server not running.".to_string(),
+            Err(_) => return "havn server not running.".to_string(),
         };
 
         let projects: Vec<serde_json::Value> = match projects_resp.json().await {
@@ -265,6 +294,143 @@ impl McpServer {
             }
             None => format!("Project '{}' not found.", params.0.project),
         }
+    }
+
+    /// Restart a project and wait for it to become healthy (port binds) or detect a crash.
+    /// Returns structured verification: status (healthy/crashed/timeout), boot time, port, and recent stderr on failure.
+    /// This is the preferred restart method for AI agents — it gives a definitive answer instead of fire-and-forget.
+    #[tool(
+        name = "restart_and_verify",
+        description = "Restart a project and verify it becomes healthy. Returns status (healthy/crashed/timeout), boot time, and stderr on failure. Use this instead of restart_project when you need to confirm the server is actually running."
+    )]
+    async fn restart_and_verify(&self, params: Parameters<RestartAndVerifyParams>) -> String {
+        let id = match self.resolve_project_id(&params.0.name).await {
+            Ok(id) => id,
+            Err(e) => return e,
+        };
+        let client = reqwest::Client::new();
+        match client
+            .post(format!("{}/projects/{}/restart-and-verify", self.api_url, id))
+            .timeout(std::time::Duration::from_secs(20))
+            .send()
+            .await
+        {
+            Ok(resp) => match resp.text().await {
+                Ok(body) => body,
+                Err(e) => format!("Error reading response: {}", e),
+            },
+            Err(e) if e.is_timeout() => {
+                format!("Verification timed out — server may still be starting. Check with get_project.")
+            }
+            Err(_) => "havn server not running.".to_string(),
+        }
+    }
+
+    /// Get recent errors and stderr output for a project.
+    /// Useful after making code changes to check if the server is throwing errors.
+    #[tool(
+        name = "get_errors",
+        description = "Get recent errors (stderr lines, exceptions, panics) for a project. Use this after code changes to check for problems."
+    )]
+    async fn get_errors(&self, params: Parameters<GetErrorsParams>) -> String {
+        let id = match self.resolve_project_id(&params.0.name).await {
+            Ok(id) => id,
+            Err(e) => return e,
+        };
+        let lines = params.0.lines.unwrap_or(20);
+        match reqwest::get(&format!("{}/projects/{}/errors?lines={}", self.api_url, id, lines)).await {
+            Ok(resp) => match resp.text().await {
+                Ok(body) => {
+                    if body == "[]" {
+                        format!("No recent errors for '{}'.", params.0.name)
+                    } else {
+                        body
+                    }
+                }
+                Err(e) => format!("Error: {}", e),
+            },
+            Err(_) => "havn server not running.".to_string(),
+        }
+    }
+
+    /// Find the nearest available (free) TCP port starting from a preferred port.
+    /// Use this before starting a new dev server to avoid port conflicts.
+    #[tool(
+        name = "find_available_port",
+        description = "Find the nearest free TCP port from a preferred starting port. Use before starting a dev server to avoid port conflicts."
+    )]
+    async fn find_available_port(&self, params: Parameters<FindAvailablePortParams>) -> String {
+        let preferred = params.0.preferred.unwrap_or(3000);
+        match reqwest::get(&format!("{}/available-port?preferred={}", self.api_url, preferred)).await {
+            Ok(resp) => match resp.text().await {
+                Ok(body) => body,
+                Err(e) => format!("Error: {}", e),
+            },
+            Err(_) => "havn server not running.".to_string(),
+        }
+    }
+
+    /// Get a full system overview: all projects, their health, running state, and error counts.
+    /// Call this at the start of a session to understand the developer's current environment.
+    #[tool(
+        name = "get_system_overview",
+        description = "Get a full overview of all projects: running state, ports, frameworks, uptime, and recent error counts. Use at the start of a session to understand the dev environment."
+    )]
+    async fn get_system_overview(&self, _params: Parameters<SystemOverviewParams>) -> String {
+        match reqwest::get(&format!("{}/system-overview", self.api_url)).await {
+            Ok(resp) => match resp.text().await {
+                Ok(body) => body,
+                Err(e) => format!("Error: {}", e),
+            },
+            Err(_) => "havn server not running. Start with `havn` or `havn install-service`.".to_string(),
+        }
+    }
+
+    /// Get the effective environment variables a project would launch with.
+    /// Shows the merged result of .env files, global secrets, and project-scoped secrets,
+    /// with the source of each variable clearly labeled.
+    #[tool(
+        name = "get_effective_env",
+        description = "Get the effective environment variables for a project (merged .env files + global secrets + project secrets). Shows the source of each variable."
+    )]
+    async fn get_effective_env(&self, params: Parameters<GetEffectiveEnvParams>) -> String {
+        let id = match self.resolve_project_id(&params.0.name).await {
+            Ok(id) => id,
+            Err(e) => return e,
+        };
+        match reqwest::get(&format!("{}/projects/{}/effective-env", self.api_url, id)).await {
+            Ok(resp) => match resp.text().await {
+                Ok(body) => {
+                    if body == "[]" {
+                        format!("No environment variables configured for '{}'.", params.0.name)
+                    } else {
+                        body
+                    }
+                }
+                Err(e) => format!("Error: {}", e),
+            },
+            Err(_) => "havn server not running.".to_string(),
+        }
+    }
+}
+
+impl McpServer {
+    /// Helper: resolve a project name to its ID.
+    async fn resolve_project_id(&self, name: &str) -> Result<i64, String> {
+        let projects_resp = reqwest::get(&format!("{}/projects", self.api_url))
+            .await
+            .map_err(|_| "havn server not running.".to_string())?;
+
+        let projects: Vec<serde_json::Value> = projects_resp
+            .json()
+            .await
+            .map_err(|e| format!("Error: {}", e))?;
+
+        projects
+            .iter()
+            .find(|p| p.get("name").and_then(|n| n.as_str()) == Some(name))
+            .and_then(|p| p.get("id").and_then(|i| i.as_i64()))
+            .ok_or_else(|| format!("Project '{}' not found.", name))
     }
 }
 
