@@ -1,8 +1,7 @@
 use rmcp::{
-    ServerHandler, ServiceExt,
     handler::server::{router::tool::ToolRouter, wrapper::Parameters},
     schemars::JsonSchema,
-    tool, tool_handler, tool_router,
+    tool, tool_handler, tool_router, ServerHandler, ServiceExt,
 };
 use serde::{Deserialize, Serialize};
 
@@ -190,19 +189,27 @@ impl McpServer {
     }
 
     /// List all detected projects with their ports, frameworks, and status.
-    #[tool(name = "list_projects", description = "List all running projects and their ports")]
+    #[tool(
+        name = "list_projects",
+        description = "List all running projects and their ports"
+    )]
     async fn list_projects(&self, _params: Parameters<ListProjectsParams>) -> String {
         match reqwest::get(&format!("{}/projects", self.api_url)).await {
             Ok(resp) => match resp.text().await {
                 Ok(body) => body,
                 Err(e) => format!("Error reading response: {}", e),
             },
-            Err(_) => "havn server not running. Start with `havn` or `havn install-service`.".to_string(),
+            Err(_) => {
+                "havn server not running. Start with `havn` or `havn install-service`.".to_string()
+            }
         }
     }
 
     /// Get details about a specific project by name.
-    #[tool(name = "get_project", description = "Get details about a specific project")]
+    #[tool(
+        name = "get_project",
+        description = "Get details about a specific project"
+    )]
     async fn get_project(&self, params: Parameters<GetProjectParams>) -> String {
         let projects_resp = match reqwest::get(&format!("{}/projects", self.api_url)).await {
             Ok(r) => r,
@@ -214,16 +221,20 @@ impl McpServer {
             Err(e) => return format!("Error: {}", e),
         };
 
-        match projects.iter().find(|p| {
-            p.get("name").and_then(|n| n.as_str()) == Some(&params.0.name)
-        }) {
+        match projects
+            .iter()
+            .find(|p| p.get("name").and_then(|n| n.as_str()) == Some(&params.0.name))
+        {
             Some(project) => serde_json::to_string_pretty(project).unwrap_or_default(),
             None => format!("Project '{}' not found.", params.0.name),
         }
     }
 
     /// Kill a process running on a specific port.
-    #[tool(name = "kill_port", description = "Kill the process running on a specific port")]
+    #[tool(
+        name = "kill_port",
+        description = "Kill the process running on a specific port"
+    )]
     async fn kill_port(&self, params: Parameters<KillPortParams>) -> String {
         let client = reqwest::Client::new();
         match client
@@ -360,9 +371,10 @@ impl McpServer {
             Err(e) => return format!("Error: {}", e),
         };
 
-        match projects.iter().find(|p| {
-            p.get("name").and_then(|n| n.as_str()) == Some(&params.0.project)
-        }) {
+        match projects
+            .iter()
+            .find(|p| p.get("name").and_then(|n| n.as_str()) == Some(&params.0.project))
+        {
             Some(project) => {
                 let ports = project
                     .get("ports")
@@ -395,7 +407,10 @@ impl McpServer {
         };
         let client = reqwest::Client::new();
         match client
-            .post(format!("{}/projects/{}/restart-and-verify", self.api_url, id))
+            .post(format!(
+                "{}/projects/{}/restart-and-verify",
+                self.api_url, id
+            ))
             .timeout(std::time::Duration::from_secs(20))
             .send()
             .await
@@ -405,7 +420,8 @@ impl McpServer {
                 Err(e) => format!("Error reading response: {}", e),
             },
             Err(e) if e.is_timeout() => {
-                format!("Verification timed out — server may still be starting. Check with get_project.")
+                "Verification timed out — server may still be starting. Check with get_project."
+                    .to_string()
             }
             Err(_) => "havn server not running.".to_string(),
         }
@@ -423,7 +439,12 @@ impl McpServer {
             Err(e) => return e,
         };
         let lines = params.0.lines.unwrap_or(20);
-        match reqwest::get(&format!("{}/projects/{}/errors?lines={}", self.api_url, id, lines)).await {
+        match reqwest::get(&format!(
+            "{}/projects/{}/errors?lines={}",
+            self.api_url, id, lines
+        ))
+        .await
+        {
             Ok(resp) => match resp.text().await {
                 Ok(body) => {
                     if body == "[]" {
@@ -446,7 +467,12 @@ impl McpServer {
     )]
     async fn find_available_port(&self, params: Parameters<FindAvailablePortParams>) -> String {
         let preferred = params.0.preferred.unwrap_or(3000);
-        match reqwest::get(&format!("{}/available-port?preferred={}", self.api_url, preferred)).await {
+        match reqwest::get(&format!(
+            "{}/available-port?preferred={}",
+            self.api_url, preferred
+        ))
+        .await
+        {
             Ok(resp) => match resp.text().await {
                 Ok(body) => body,
                 Err(e) => format!("Error: {}", e),
@@ -467,7 +493,9 @@ impl McpServer {
                 Ok(body) => body,
                 Err(e) => format!("Error: {}", e),
             },
-            Err(_) => "havn server not running. Start with `havn` or `havn install-service`.".to_string(),
+            Err(_) => {
+                "havn server not running. Start with `havn` or `havn install-service`.".to_string()
+            }
         }
     }
 
@@ -487,7 +515,10 @@ impl McpServer {
             Ok(resp) => match resp.text().await {
                 Ok(body) => {
                     if body == "[]" {
-                        format!("No environment variables configured for '{}'.", params.0.name)
+                        format!(
+                            "No environment variables configured for '{}'.",
+                            params.0.name
+                        )
                     } else {
                         body
                     }
@@ -512,13 +543,15 @@ impl McpServer {
             .timeout(std::time::Duration::from_secs(3))
             .build()
             .ok()
-            .and_then(|c| futures::executor::block_on(async {
-                let resp = c.get(url).send().await.ok()?;
-                let data: serde_json::Value = resp.json().await.ok()?;
-                data.get("tag_name")
-                    .and_then(|t| t.as_str())
-                    .map(|t| t.strip_prefix('v').unwrap_or(t).to_string())
-            }));
+            .and_then(|c| {
+                futures::executor::block_on(async {
+                    let resp = c.get(url).send().await.ok()?;
+                    let data: serde_json::Value = resp.json().await.ok()?;
+                    data.get("tag_name")
+                        .and_then(|t| t.as_str())
+                        .map(|t| t.strip_prefix('v').unwrap_or(t).to_string())
+                })
+            });
 
         match latest {
             Some(ref ver) if ver != current => {
@@ -557,7 +590,8 @@ impl McpServer {
                 }
                 // Parse and filter
                 if let Ok(logs) = serde_json::from_str::<Vec<serde_json::Value>>(&body) {
-                    let filtered: Vec<&serde_json::Value> = logs.iter()
+                    let filtered: Vec<&serde_json::Value> = logs
+                        .iter()
                         .filter(|l| l.get("stream").and_then(|s| s.as_str()) == Some(stream_filter))
                         .collect();
                     if filtered.is_empty() {

@@ -17,11 +17,7 @@ use crate::ws::WsEvent;
 ///
 /// On macOS the loop wakes immediately when a watched process exits (kqueue);
 /// on other platforms it falls back to polling every `interval_secs` seconds.
-pub async fn run_loop(
-    registry: Arc<Registry>,
-    tx: broadcast::Sender<WsEvent>,
-    interval_secs: u64,
-) {
+pub async fn run_loop(registry: Arc<Registry>, tx: broadcast::Sender<WsEvent>, interval_secs: u64) {
     let watcher = ProcessWatcher::spawn();
     let interval = Duration::from_secs(interval_secs);
 
@@ -126,9 +122,9 @@ pub async fn scan_once() -> Vec<ScanResult> {
         let project_root = project.as_ref().map(|p| p.root.clone());
 
         // Deduplicate: skip if we already have this port+project combination
-        let dominated = results.iter().any(|r: &ScanResult| {
-            r.port == entry.port && r.project_root == project_root
-        });
+        let dominated = results
+            .iter()
+            .any(|r: &ScanResult| r.port == entry.port && r.project_root == project_root);
         if dominated {
             continue;
         }
@@ -221,11 +217,11 @@ mod tests {
         assert!(is_common_dev_port(8080));
         assert!(is_common_dev_port(9390));
 
-        assert!(!is_common_dev_port(22));    // SSH
-        assert!(!is_common_dev_port(80));    // HTTP
-        assert!(!is_common_dev_port(443));   // HTTPS
-        assert!(!is_common_dev_port(5432));  // PostgreSQL
-        assert!(!is_common_dev_port(6379));  // Redis
+        assert!(!is_common_dev_port(22)); // SSH
+        assert!(!is_common_dev_port(80)); // HTTP
+        assert!(!is_common_dev_port(443)); // HTTPS
+        assert!(!is_common_dev_port(5432)); // PostgreSQL
+        assert!(!is_common_dev_port(6379)); // Redis
         assert!(!is_common_dev_port(27017)); // MongoDB
     }
 }

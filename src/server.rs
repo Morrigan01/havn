@@ -45,13 +45,19 @@ pub async fn run(bind: String, port: u16) {
         .route("/projects", post(api::add_project))
         .route("/projects/{id}/kill", post(api::kill_project))
         .route("/projects/{id}/restart", post(api::restart_project))
-        .route("/projects/{id}/processes/{port}/restart", post(api::restart_process))
+        .route(
+            "/projects/{id}/processes/{port}/restart",
+            post(api::restart_process),
+        )
         .route("/projects/{id}", patch(api::patch_project))
         .route("/projects/{id}", delete(api::delete_project))
         .route("/ports", get(api::get_ports))
         .route("/kill/{port}", post(api::kill_port))
         .route("/projects/{id}/env", get(api::get_project_env))
-        .route("/projects/{id}/env/{key}", patch(api::update_project_env_key))
+        .route(
+            "/projects/{id}/env/{key}",
+            patch(api::update_project_env_key),
+        )
         .route("/secrets", get(api::list_secrets))
         .route("/secrets", post(api::set_secret))
         .route("/secrets/{key}", get(api::get_secret))
@@ -66,7 +72,10 @@ pub async fn run(bind: String, port: u16) {
         .route("/profiles", post(api::create_profile))
         .route("/profiles/{id}", delete(api::delete_profile_handler))
         .route("/profiles/{id}/projects", post(api::add_project_to_profile))
-        .route("/profiles/{id}/projects/{project_id}", delete(api::remove_project_from_profile))
+        .route(
+            "/profiles/{id}/projects/{project_id}",
+            delete(api::remove_project_from_profile),
+        )
         .route("/profiles/{id}/start", post(api::start_profile))
         .route("/profiles/{id}/stop", post(api::stop_profile))
         .route("/projects/{id}/run", post(api::run_project_command))
@@ -79,7 +88,10 @@ pub async fn run(bind: String, port: u16) {
         .route("/profiles/{id}/stop-stack", post(api::stop_stack))
         .route("/profiles/{id}/diagnose", get(api::diagnose_stack))
         .route("/profiles/{id}/validate-env", get(api::validate_env))
-        .route("/projects/{id}/restart-and-verify", post(api::restart_and_verify))
+        .route(
+            "/projects/{id}/restart-and-verify",
+            post(api::restart_and_verify),
+        )
         .route("/projects/{id}/errors", get(api::get_project_errors))
         .route("/projects/{id}/effective-env", get(api::get_effective_env))
         .route("/available-port", get(api::find_available_port))
@@ -89,8 +101,12 @@ pub async fn run(bind: String, port: u16) {
         .layer(
             CorsLayer::new()
                 .allow_origin([
-                    format!("http://localhost:{}", port).parse::<HeaderValue>().unwrap(),
-                    format!("http://127.0.0.1:{}", port).parse::<HeaderValue>().unwrap(),
+                    format!("http://localhost:{}", port)
+                        .parse::<HeaderValue>()
+                        .unwrap(),
+                    format!("http://127.0.0.1:{}", port)
+                        .parse::<HeaderValue>()
+                        .unwrap(),
                 ])
                 .allow_methods([
                     axum::http::Method::GET,
@@ -135,10 +151,7 @@ pub async fn run(bind: String, port: u16) {
         .expect("Server error");
 }
 
-async fn ws_handler(
-    ws: WebSocketUpgrade,
-    State(state): State<AppState>,
-) -> Response {
+async fn ws_handler(ws: WebSocketUpgrade, State(state): State<AppState>) -> Response {
     ws.on_upgrade(move |socket| handle_ws(socket, state))
 }
 

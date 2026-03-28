@@ -167,16 +167,10 @@ async fn one_shot_scan() {
         println!("No listening ports detected.");
         return;
     }
-    println!(
-        "{:<20} {:<12} {:<10}",
-        "PROJECT", "FRAMEWORK", "PORT"
-    );
+    println!("{:<20} {:<12} {:<10}", "PROJECT", "FRAMEWORK", "PORT");
     println!("{}", "-".repeat(45));
     for entry in &results {
-        let name = entry
-            .project_name
-            .as_deref()
-            .unwrap_or("(unknown)");
+        let name = entry.project_name.as_deref().unwrap_or("(unknown)");
         let framework = entry.framework.as_deref().unwrap_or("-");
         println!("{:<20} {:<12} :{}", name, framework, entry.port);
     }
@@ -192,10 +186,7 @@ pub async fn kill(args: &Cli, target: &str) {
             Ok(resp) => {
                 if let Ok(projects) = resp.json::<Vec<crate::api::ProjectResponse>>().await {
                     if let Some(p) = projects.iter().find(|p| p.name == target) {
-                        format!(
-                            "http://{}:{}/projects/{}/kill",
-                            args.bind, args.port, p.id
-                        )
+                        format!("http://{}:{}/projects/{}/kill", args.bind, args.port, p.id)
                     } else {
                         eprintln!("Project '{}' not found.", target);
                         return;
@@ -264,7 +255,10 @@ pub async fn remove(args: &Cli, target: &str) {
         }
     };
 
-    let project = match projects.iter().find(|p| p.name == target || p.path == target) {
+    let project = match projects
+        .iter()
+        .find(|p| p.name == target || p.path == target)
+    {
         Some(p) => p,
         None => {
             eprintln!("Project '{}' not found.", target);
@@ -354,7 +348,10 @@ pub async fn restart(args: &Cli, target: &str) {
         }
     };
 
-    let project = match projects.iter().find(|p| p.name == target || p.path == target) {
+    let project = match projects
+        .iter()
+        .find(|p| p.name == target || p.path == target)
+    {
         Some(p) => p,
         None => {
             eprintln!("Project '{}' not found.", target);
@@ -362,7 +359,10 @@ pub async fn restart(args: &Cli, target: &str) {
         }
     };
 
-    let url = format!("http://{}:{}/projects/{}/restart", args.bind, args.port, project.id);
+    let url = format!(
+        "http://{}:{}/projects/{}/restart",
+        args.bind, args.port, project.id
+    );
     let client = reqwest::Client::new();
     match client.post(&url).send().await {
         Ok(resp) if resp.status().is_success() => {
@@ -370,7 +370,12 @@ pub async fn restart(args: &Cli, target: &str) {
         }
         Ok(resp) => {
             let body = resp.json::<serde_json::Value>().await.unwrap_or_default();
-            eprintln!("Restart failed: {}", body.get("message").and_then(|m| m.as_str()).unwrap_or("unknown error"));
+            eprintln!(
+                "Restart failed: {}",
+                body.get("message")
+                    .and_then(|m| m.as_str())
+                    .unwrap_or("unknown error")
+            );
         }
         Err(e) => eprintln!("Error: {}", e),
     }
@@ -394,7 +399,10 @@ pub async fn set_start_cmd(args: &Cli, project: &str, cmd: &str) {
         }
     };
 
-    let found = match projects.iter().find(|p| p.name == project || p.path == project) {
+    let found = match projects
+        .iter()
+        .find(|p| p.name == project || p.path == project)
+    {
         Some(p) => p,
         None => {
             eprintln!("Project '{}' not found.", project);
@@ -418,12 +426,21 @@ pub async fn secret(args: &Cli, action: &SecretAction) {
     let client = reqwest::Client::new();
 
     match action {
-        SecretAction::Set { key, value, project } => {
+        SecretAction::Set {
+            key,
+            value,
+            project,
+        } => {
             let mut body = serde_json::json!({ "key": key, "value": value });
             if let Some(p) = project {
                 body["project"] = serde_json::json!(p);
             }
-            match client.post(format!("{}/secrets", base)).json(&body).send().await {
+            match client
+                .post(format!("{}/secrets", base))
+                .json(&body)
+                .send()
+                .await
+            {
                 Ok(r) if r.status().is_success() => println!("Secret '{}' stored.", key),
                 Ok(r) => eprintln!("Failed: {}", r.text().await.unwrap_or_default()),
                 Err(e) => eprintln!("Error: {}", e),
@@ -437,7 +454,10 @@ pub async fn secret(args: &Cli, action: &SecretAction) {
             match client.get(&url).send().await {
                 Ok(r) if r.status().is_success() => {
                     let data: serde_json::Value = r.json().await.unwrap_or_default();
-                    println!("{}", data.get("value").and_then(|v| v.as_str()).unwrap_or(""));
+                    println!(
+                        "{}",
+                        data.get("value").and_then(|v| v.as_str()).unwrap_or("")
+                    );
                 }
                 Ok(r) if r.status() == 404 => eprintln!("Secret '{}' not found.", key),
                 Ok(r) => eprintln!("Failed: {}", r.text().await.unwrap_or_default()),
@@ -536,7 +556,10 @@ const GITHUB_REPO: &str = "Morrigan01/havn";
 
 /// Check GitHub for the latest release. Returns (latest_version, download_url) if newer.
 async fn check_latest_release() -> Option<(String, String)> {
-    let url = format!("https://api.github.com/repos/{}/releases/latest", GITHUB_REPO);
+    let url = format!(
+        "https://api.github.com/repos/{}/releases/latest",
+        GITHUB_REPO
+    );
     let client = reqwest::Client::builder()
         .user_agent("havn-update-checker")
         .timeout(std::time::Duration::from_secs(5))
@@ -555,20 +578,27 @@ async fn check_latest_release() -> Option<(String, String)> {
     if latest_version != current && version_is_newer(latest_version, current) {
         // Find the right asset for this platform
         let target = current_target();
-        let download_url = data.get("assets")
+        let download_url = data
+            .get("assets")
             .and_then(|a| a.as_array())
             .and_then(|assets| {
                 assets.iter().find_map(|asset| {
                     let name = asset.get("name")?.as_str()?;
                     if name.contains(&target) {
-                        asset.get("browser_download_url")?.as_str().map(|s| s.to_string())
+                        asset
+                            .get("browser_download_url")?
+                            .as_str()
+                            .map(|s| s.to_string())
                     } else {
                         None
                     }
                 })
             })
             .unwrap_or_else(|| {
-                format!("https://github.com/{}/releases/tag/{}", GITHUB_REPO, latest_tag)
+                format!(
+                    "https://github.com/{}/releases/tag/{}",
+                    GITHUB_REPO, latest_tag
+                )
             });
 
         Some((latest_version.to_string(), download_url))
@@ -578,17 +608,23 @@ async fn check_latest_release() -> Option<(String, String)> {
 }
 
 fn version_is_newer(latest: &str, current: &str) -> bool {
-    let parse = |v: &str| -> Vec<u32> {
-        v.split('.').filter_map(|s| s.parse().ok()).collect()
-    };
+    let parse = |v: &str| -> Vec<u32> { v.split('.').filter_map(|s| s.parse().ok()).collect() };
     let l = parse(latest);
     let c = parse(current);
     l > c
 }
 
 fn current_target() -> String {
-    let arch = if cfg!(target_arch = "aarch64") { "aarch64" } else { "x86_64" };
-    let os = if cfg!(target_os = "macos") { "apple-darwin" } else { "unknown-linux-gnu" };
+    let arch = if cfg!(target_arch = "aarch64") {
+        "aarch64"
+    } else {
+        "x86_64"
+    };
+    let os = if cfg!(target_os = "macos") {
+        "apple-darwin"
+    } else {
+        "unknown-linux-gnu"
+    };
     format!("{}-{}", arch, os)
 }
 
@@ -612,15 +648,24 @@ pub async fn update() {
 
     match check_latest_release().await {
         None => {
-            println!("You're on the latest version (v{}).", env!("CARGO_PKG_VERSION"));
-            return;
+            println!(
+                "You're on the latest version (v{}).",
+                env!("CARGO_PKG_VERSION")
+            );
         }
         Some((version, url)) => {
-            println!("New version available: v{} (current: v{})", version, env!("CARGO_PKG_VERSION"));
+            println!(
+                "New version available: v{} (current: v{})",
+                version,
+                env!("CARGO_PKG_VERSION")
+            );
 
             if url.starts_with("https://github.com") && url.contains("/releases/tag/") {
                 // No binary asset for this platform, point to releases page
-                println!("No pre-built binary found for your platform ({}).", current_target());
+                println!(
+                    "No pre-built binary found for your platform ({}).",
+                    current_target()
+                );
                 println!("Download manually: {}", url);
                 println!("Or update from source: cargo install --path . --force");
                 return;
@@ -696,7 +741,10 @@ pub async fn update() {
             // Clean up backup
             std::fs::remove_file(&backup_path).ok();
 
-            println!("Updated to v{}. Restart havn to use the new version.", version);
+            println!(
+                "Updated to v{}. Restart havn to use the new version.",
+                version
+            );
         }
     }
 }

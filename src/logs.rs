@@ -18,7 +18,9 @@ pub struct LogStore {
 
 impl LogStore {
     pub fn new() -> Self {
-        Self { buffers: Mutex::new(HashMap::new()) }
+        Self {
+            buffers: Mutex::new(HashMap::new()),
+        }
     }
 
     pub fn push(&self, project_id: i64, stream: &str, text: String) {

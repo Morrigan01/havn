@@ -78,7 +78,7 @@ pub struct GitStatus {
 #[derive(Serialize)]
 pub struct HealthCheck {
     pub port: u16,
-    pub status: String,   // "up" | "down" | "timeout"
+    pub status: String, // "up" | "down" | "timeout"
     pub status_code: Option<u16>,
     pub latency_ms: u64,
 }
@@ -107,7 +107,7 @@ pub struct LogQuery {
 
 #[derive(Serialize)]
 pub struct RestartVerifyResult {
-    pub status: String,        // "healthy" | "crashed" | "timeout"
+    pub status: String, // "healthy" | "crashed" | "timeout"
     pub port: Option<u16>,
     pub boot_time_ms: Option<u64>,
     pub exit_code: Option<i32>,
@@ -135,7 +135,7 @@ fn validate_start_cmd(cmd: &str) -> Result<(), String> {
         "rm -rf /*",
         "mkfs.",
         "dd if=",
-        ":(){",         // fork bomb
+        ":(){", // fork bomb
         "chmod -R 777 /",
         "> /dev/sda",
         "curl | sh",
@@ -196,7 +196,10 @@ pub async fn kill_project(
     check_rate_limit(&state)?;
     let project = state.registry.get_project(id).ok_or((
         StatusCode::NOT_FOUND,
-        Json(KillResult { status: "error".into(), message: "Project not found".into() }),
+        Json(KillResult {
+            status: "error".into(),
+            message: "Project not found".into(),
+        }),
     ))?;
 
     let mut killed = 0;
@@ -241,7 +244,10 @@ pub async fn kill_port(
     if !found {
         return Err((
             StatusCode::NOT_FOUND,
-            Json(KillResult { status: "error".into(), message: format!("Port {} not found", port) }),
+            Json(KillResult {
+                status: "error".into(),
+                message: format!("Port {} not found", port),
+            }),
         ));
     }
 
@@ -256,16 +262,24 @@ pub async fn patch_project(
     Path(id): Path<i64>,
     Json(body): Json<PatchProject>,
 ) -> Result<StatusCode, (StatusCode, Json<KillResult>)> {
-    state
-        .registry
-        .get_project(id)
-        .ok_or((StatusCode::NOT_FOUND, Json(KillResult { status: "error".into(), message: "Project not found".into() })))?;
+    state.registry.get_project(id).ok_or((
+        StatusCode::NOT_FOUND,
+        Json(KillResult {
+            status: "error".into(),
+            message: "Project not found".into(),
+        }),
+    ))?;
 
     if let Some(ref cmd) = body.start_cmd {
-        validate_start_cmd(cmd).map_err(|e| (
-            StatusCode::BAD_REQUEST,
-            Json(KillResult { status: "error".into(), message: e }),
-        ))?;
+        validate_start_cmd(cmd).map_err(|e| {
+            (
+                StatusCode::BAD_REQUEST,
+                Json(KillResult {
+                    status: "error".into(),
+                    message: e,
+                }),
+            )
+        })?;
     }
 
     state
@@ -334,7 +348,7 @@ pub async fn restart_project(
     // haven't released it yet. Instead: respond immediately, then kill, then
     // spawn after the port is free.
     let our_pid = std::process::id();
-    let self_restart = project.pids.iter().any(|&p| p as u32 == our_pid);
+    let self_restart = project.pids.contains(&our_pid);
 
     if self_restart {
         // We cannot use a tokio::spawn here: killing our own PID destroys the
@@ -344,7 +358,12 @@ pub async fn restart_project(
         let kill_cmds: String = project
             .pids
             .iter()
-            .map(|&p| format!("kill -TERM {} 2>/dev/null; sleep 0.4; kill -KILL {} 2>/dev/null", p, p))
+            .map(|&p| {
+                format!(
+                    "kill -TERM {} 2>/dev/null; sleep 0.4; kill -KILL {} 2>/dev/null",
+                    p, p
+                )
+            })
             .collect::<Vec<_>>()
             .join("; ");
         // The outer subshell (& disown) runs independently of this process.
@@ -439,7 +458,7 @@ pub async fn restart_process(
     // which can be stale by the time the user clicks Restart.
     let live_pids = live_pids_for_port(port).await;
 
-    if live_pids.iter().any(|&p| p == our_pid) {
+    if live_pids.contains(&our_pid) {
         // Self-restart path (server is on this port) — detached shell.
         let kill_cmds: String = live_pids
             .iter()
@@ -453,11 +472,13 @@ pub async fn restart_process(
             start_cmd.replace('\'', "'\\''"),
         );
         std::process::Command::new("sh")
-            .arg("-c").arg(&shell_cmd)
+            .arg("-c")
+            .arg(&shell_cmd)
             .stdin(std::process::Stdio::null())
             .stdout(std::process::Stdio::null())
             .stderr(std::process::Stdio::null())
-            .spawn().ok();
+            .spawn()
+            .ok();
         return Ok(Json(KillResult {
             status: "success".to_string(),
             message: format!("Restarted :{} in '{}'", port, name),
@@ -487,7 +508,8 @@ pub async fn restart_process(
     env_vars.extend(project_secrets);
 
     let mut cmd = tokio::process::Command::new("sh");
-    cmd.arg("-c").arg(&start_cmd)
+    cmd.arg("-c")
+        .arg(&start_cmd)
         .current_dir(&path)
         .stdin(std::process::Stdio::null())
         .stdout(std::process::Stdio::piped())
@@ -518,7 +540,14 @@ pub async fn restart_process(
 /// Returns the live PIDs currently listening on `port` by running lsof.
 async fn live_pids_for_port(port: u16) -> Vec<u32> {
     let out = tokio::process::Command::new("lsof")
-        .args(["-iTCP", &format!(":{}", port), "-sTCP:LISTEN", "-t", "-n", "-P"])
+        .args([
+            "-iTCP",
+            &format!(":{}", port),
+            "-sTCP:LISTEN",
+            "-t",
+            "-n",
+            "-P",
+        ])
         .output()
         .await;
     match out {
@@ -539,7 +568,10 @@ pub async fn restart_and_verify(
     check_rate_limit(&state)?;
     let project = state.registry.get_project(id).ok_or((
         StatusCode::NOT_FOUND,
-        Json(KillResult { status: "error".into(), message: "Project not found".into() }),
+        Json(KillResult {
+            status: "error".into(),
+            message: "Project not found".into(),
+        }),
     ))?;
 
     let start_cmd = project.start_cmd.clone().ok_or((
@@ -550,7 +582,9 @@ pub async fn restart_and_verify(
         }),
     ))?;
 
-    let preferred_port = project.preferred_port.or_else(|| project.ports.first().copied());
+    let preferred_port = project
+        .preferred_port
+        .or_else(|| project.ports.first().copied());
     let path = project.path.clone();
     let name = project.name.clone();
 
@@ -599,16 +633,19 @@ pub async fn restart_and_verify(
                         boot_time_ms: Some(elapsed.as_millis() as u64),
                         exit_code: None,
                         last_stderr: get_recent_stderr(&state.logs, id, 5),
-                        message: format!("'{}' started but port not detected within {}s", name, timeout.as_secs()),
+                        message: format!(
+                            "'{}' started but port not detected within {}s",
+                            name,
+                            timeout.as_secs()
+                        ),
                     }));
                 }
 
                 // Check if process has crashed
                 if let Some(pid) = child_pid {
-                    let alive = nix::sys::signal::kill(
-                        nix::unistd::Pid::from_raw(pid as i32),
-                        None,
-                    ).is_ok();
+                    let alive =
+                        nix::sys::signal::kill(nix::unistd::Pid::from_raw(pid as i32), None)
+                            .is_ok();
                     if !alive {
                         return Ok(Json(RestartVerifyResult {
                             status: "crashed".into(),
@@ -626,7 +663,12 @@ pub async fn restart_and_verify(
                     let pids = live_pids_for_port(port).await;
                     if !pids.is_empty() {
                         let boot_ms = elapsed.as_millis() as u64;
-                        tracing::info!("Restart-and-verify '{}': healthy on :{} in {}ms", name, port, boot_ms);
+                        tracing::info!(
+                            "Restart-and-verify '{}': healthy on :{} in {}ms",
+                            name,
+                            port,
+                            boot_ms
+                        );
                         return Ok(Json(RestartVerifyResult {
                             status: "healthy".into(),
                             port: Some(port),
@@ -657,7 +699,10 @@ pub async fn get_project_errors(
     Path(id): Path<i64>,
     Query(q): Query<LogQuery>,
 ) -> Result<Json<Vec<crate::logs::LogLine>>, StatusCode> {
-    state.registry.get_project(id).ok_or(StatusCode::NOT_FOUND)?;
+    state
+        .registry
+        .get_project(id)
+        .ok_or(StatusCode::NOT_FOUND)?;
     let n = q.lines.unwrap_or(50).min(200);
     let all_logs = state.logs.get(id, 500);
     let errors: Vec<crate::logs::LogLine> = all_logs
@@ -675,15 +720,17 @@ pub async fn get_project_errors(
                 || l.text.contains("fatal")
         })
         .collect();
-    let skip = if errors.len() > n { errors.len() - n } else { 0 };
+    let skip = if errors.len() > n {
+        errors.len() - n
+    } else {
+        0
+    };
     Ok(Json(errors.into_iter().skip(skip).collect()))
 }
 
 /// Find the nearest available port starting from a preferred port.
 /// Checks both IPv4 and IPv6 to avoid false positives.
-pub async fn find_available_port(
-    Query(q): Query<FindPortQuery>,
-) -> Json<serde_json::Value> {
+pub async fn find_available_port(Query(q): Query<FindPortQuery>) -> Json<serde_json::Value> {
     let start = q.preferred.unwrap_or(3000);
     for port in start..=start + 100 {
         // Try binding on both IPv4 and IPv6 — a port is only free if both succeed.
@@ -714,7 +761,10 @@ pub async fn get_effective_env(
     State(state): State<AppState>,
     Path(id): Path<i64>,
 ) -> Result<Json<Vec<EffectiveEnv>>, StatusCode> {
-    let project = state.registry.get_project(id).ok_or(StatusCode::NOT_FOUND)?;
+    let project = state
+        .registry
+        .get_project(id)
+        .ok_or(StatusCode::NOT_FOUND)?;
 
     let mut result: Vec<EffectiveEnv> = Vec::new();
     let mut seen: std::collections::HashMap<String, usize> = std::collections::HashMap::new();
@@ -774,16 +824,18 @@ pub async fn get_effective_env(
 }
 
 /// System overview: all projects with health/status summary.
-pub async fn system_overview(
-    State(state): State<AppState>,
-) -> Json<serde_json::Value> {
+pub async fn system_overview(State(state): State<AppState>) -> Json<serde_json::Value> {
     let projects = state.registry.get_all_projects();
     let mut entries = Vec::new();
 
     for p in &projects {
-        let error_count = state.logs.get(p.id, 500)
+        let error_count = state
+            .logs
+            .get(p.id, 500)
             .iter()
-            .filter(|l| l.stream == "stderr" || l.text.contains("Error") || l.text.contains("panic"))
+            .filter(|l| {
+                l.stream == "stderr" || l.text.contains("Error") || l.text.contains("panic")
+            })
             .count();
 
         entries.push(serde_json::json!({
@@ -800,7 +852,10 @@ pub async fn system_overview(
         }));
     }
 
-    let running = entries.iter().filter(|e| e["running"].as_bool() == Some(true)).count();
+    let running = entries
+        .iter()
+        .filter(|e| e["running"].as_bool() == Some(true))
+        .count();
     let total = entries.len();
 
     Json(serde_json::json!({
@@ -812,7 +867,11 @@ pub async fn system_overview(
 }
 
 /// Helper: get the last N stderr lines from the log store.
-fn get_recent_stderr(logs: &std::sync::Arc<crate::logs::LogStore>, project_id: i64, n: usize) -> Vec<String> {
+fn get_recent_stderr(
+    logs: &std::sync::Arc<crate::logs::LogStore>,
+    project_id: i64,
+    n: usize,
+) -> Vec<String> {
     let all = logs.get(project_id, 100);
     all.iter()
         .filter(|l| l.stream == "stderr")
@@ -874,7 +933,10 @@ pub async fn get_project_env(
     State(state): State<AppState>,
     Path(id): Path<i64>,
 ) -> Result<Json<Vec<crate::env_file::EnvEntry>>, StatusCode> {
-    let project = state.registry.get_project(id).ok_or(StatusCode::NOT_FOUND)?;
+    let project = state
+        .registry
+        .get_project(id)
+        .ok_or(StatusCode::NOT_FOUND)?;
     Ok(Json(crate::env_file::read_env_files(&project.path)))
 }
 
@@ -987,26 +1049,42 @@ pub async fn get_project_git(
 ) -> Result<Json<GitStatus>, (StatusCode, Json<KillResult>)> {
     let project = state.registry.get_project(id).ok_or((
         StatusCode::NOT_FOUND,
-        Json(KillResult { status: "error".into(), message: "Project not found".into() }),
+        Json(KillResult {
+            status: "error".into(),
+            message: "Project not found".into(),
+        }),
     ))?;
 
     let out = tokio::process::Command::new("git")
         .args(["-C", &project.path, "status", "--porcelain=v1", "-b"])
         .output()
         .await
-        .map_err(|e| (StatusCode::INTERNAL_SERVER_ERROR, Json(KillResult { status: "error".into(), message: e.to_string() })))?;
+        .map_err(|e| {
+            (
+                StatusCode::INTERNAL_SERVER_ERROR,
+                Json(KillResult {
+                    status: "error".into(),
+                    message: e.to_string(),
+                }),
+            )
+        })?;
 
     if !out.status.success() {
-        return Err((StatusCode::UNPROCESSABLE_ENTITY, Json(KillResult {
-            status: "error".into(),
-            message: "Not a git repository".into(),
-        })));
+        return Err((
+            StatusCode::UNPROCESSABLE_ENTITY,
+            Json(KillResult {
+                status: "error".into(),
+                message: "Not a git repository".into(),
+            }),
+        ));
     }
 
     let stdout = String::from_utf8_lossy(&out.stdout);
     let mut lines = stdout.lines();
     let branch_line = lines.next().unwrap_or("").trim_start_matches("## ");
-    let branch = branch_line.split("...").next()
+    let branch = branch_line
+        .split("...")
+        .next()
         .and_then(|s| s.split(' ').next())
         .unwrap_or("HEAD")
         .to_string();
@@ -1021,7 +1099,10 @@ pub async fn get_project_health(
     State(state): State<AppState>,
     Path(id): Path<i64>,
 ) -> Result<Json<Vec<HealthCheck>>, StatusCode> {
-    let project = state.registry.get_project(id).ok_or(StatusCode::NOT_FOUND)?;
+    let project = state
+        .registry
+        .get_project(id)
+        .ok_or(StatusCode::NOT_FOUND)?;
 
     let checks = futures::future::join_all(project.ports.iter().map(|&port| async move {
         let start = std::time::Instant::now();
@@ -1040,12 +1121,17 @@ pub async fn get_project_health(
             },
             Err(e) => HealthCheck {
                 port,
-                status: if e.is_timeout() { "timeout".into() } else { "down".into() },
+                status: if e.is_timeout() {
+                    "timeout".into()
+                } else {
+                    "down".into()
+                },
                 status_code: None,
                 latency_ms: start.elapsed().as_millis() as u64,
             },
         }
-    })).await;
+    }))
+    .await;
 
     Ok(Json(checks))
 }
@@ -1056,13 +1142,21 @@ pub async fn get_project_resources(
     State(state): State<AppState>,
     Path(id): Path<i64>,
 ) -> Result<Json<Vec<ProcessStats>>, StatusCode> {
-    let project = state.registry.get_project(id).ok_or(StatusCode::NOT_FOUND)?;
+    let project = state
+        .registry
+        .get_project(id)
+        .ok_or(StatusCode::NOT_FOUND)?;
 
     if project.pids.is_empty() {
         return Ok(Json(Vec::new()));
     }
 
-    let pid_list = project.pids.iter().map(|p| p.to_string()).collect::<Vec<_>>().join(",");
+    let pid_list = project
+        .pids
+        .iter()
+        .map(|p| p.to_string())
+        .collect::<Vec<_>>()
+        .join(",");
     let out = tokio::process::Command::new("ps")
         .args(["-p", &pid_list, "-o", "pid=,%cpu=,rss="])
         .output()
@@ -1103,7 +1197,10 @@ pub async fn open_terminal(
 ) -> Result<Json<KillResult>, (StatusCode, Json<KillResult>)> {
     let project = state.registry.get_project(id).ok_or((
         StatusCode::NOT_FOUND,
-        Json(KillResult { status: "error".into(), message: "Project not found".into() }),
+        Json(KillResult {
+            status: "error".into(),
+            message: "Project not found".into(),
+        }),
     ))?;
 
     #[cfg(target_os = "macos")]
@@ -1113,11 +1210,18 @@ pub async fn open_terminal(
             project.path.replace('\'', "\\'")
         );
         std::process::Command::new("osascript")
-            .arg("-e").arg(&script)
+            .arg("-e")
+            .arg(&script)
             .spawn()
-            .map_err(|e| (StatusCode::INTERNAL_SERVER_ERROR, Json(KillResult {
-                status: "error".into(), message: e.to_string()
-            })))?;
+            .map_err(|e| {
+                (
+                    StatusCode::INTERNAL_SERVER_ERROR,
+                    Json(KillResult {
+                        status: "error".into(),
+                        message: e.to_string(),
+                    }),
+                )
+            })?;
     }
 
     #[cfg(not(target_os = "macos"))]
@@ -1125,11 +1229,18 @@ pub async fn open_terminal(
         for term in &["x-terminal-emulator", "gnome-terminal", "xterm"] {
             if std::process::Command::new(term)
                 .arg(&format!("--working-directory={}", project.path))
-                .spawn().is_ok() { break; }
+                .spawn()
+                .is_ok()
+            {
+                break;
+            }
         }
     }
 
-    Ok(Json(KillResult { status: "success".into(), message: "Terminal opened".into() }))
+    Ok(Json(KillResult {
+        status: "success".into(),
+        message: "Terminal opened".into(),
+    }))
 }
 
 // ── Logs ─────────────────────────────────────────────────────────────────
@@ -1139,7 +1250,10 @@ pub async fn get_project_logs(
     Path(id): Path<i64>,
     Query(q): Query<LogQuery>,
 ) -> Result<Json<Vec<crate::logs::LogLine>>, StatusCode> {
-    state.registry.get_project(id).ok_or(StatusCode::NOT_FOUND)?;
+    state
+        .registry
+        .get_project(id)
+        .ok_or(StatusCode::NOT_FOUND)?;
     let n = q.lines.unwrap_or(200).min(500);
     Ok(Json(state.logs.get(id, n)))
 }
@@ -1148,16 +1262,17 @@ pub async fn clear_project_logs(
     State(state): State<AppState>,
     Path(id): Path<i64>,
 ) -> Result<StatusCode, StatusCode> {
-    state.registry.get_project(id).ok_or(StatusCode::NOT_FOUND)?;
+    state
+        .registry
+        .get_project(id)
+        .ok_or(StatusCode::NOT_FOUND)?;
     state.logs.clear(id);
     Ok(StatusCode::OK)
 }
 
 // ── Profiles ──────────────────────────────────────────────────────────────
 
-pub async fn list_profiles(
-    State(state): State<AppState>,
-) -> Json<Vec<crate::registry::Profile>> {
+pub async fn list_profiles(State(state): State<AppState>) -> Json<Vec<crate::registry::Profile>> {
     Json(state.registry.list_profiles())
 }
 
@@ -1165,10 +1280,15 @@ pub async fn create_profile(
     State(state): State<AppState>,
     Json(body): Json<CreateProfile>,
 ) -> Result<Json<crate::registry::Profile>, (StatusCode, Json<KillResult>)> {
-    let id = state.registry.create_profile(&body.name).map_err(|e| (
-        StatusCode::CONFLICT,
-        Json(KillResult { status: "error".into(), message: e }),
-    ))?;
+    let id = state.registry.create_profile(&body.name).map_err(|e| {
+        (
+            StatusCode::CONFLICT,
+            Json(KillResult {
+                status: "error".into(),
+                message: e,
+            }),
+        )
+    })?;
     let profiles = state.registry.list_profiles();
     let profile = profiles.into_iter().find(|p| p.id == id).unwrap();
     Ok(Json(profile))
@@ -1187,7 +1307,9 @@ pub async fn add_project_to_profile(
     Path(profile_id): Path<i64>,
     Json(body): Json<AddProfileProject>,
 ) -> StatusCode {
-    state.registry.add_project_to_profile(profile_id, body.project_id);
+    state
+        .registry
+        .add_project_to_profile(profile_id, body.project_id);
     StatusCode::OK
 }
 
@@ -1195,7 +1317,9 @@ pub async fn remove_project_from_profile(
     State(state): State<AppState>,
     Path((profile_id, project_id)): Path<(i64, i64)>,
 ) -> StatusCode {
-    state.registry.remove_project_from_profile(profile_id, project_id);
+    state
+        .registry
+        .remove_project_from_profile(profile_id, project_id);
     StatusCode::OK
 }
 
@@ -1215,24 +1339,37 @@ pub async fn start_profile(
     for project_id in &profile.project_ids {
         if let Some(project) = state.registry.get_project(*project_id) {
             if let Some(ref cmd) = project.start_cmd {
-                for &pid in &project.pids { kill_pid(pid, &project.path).ok(); }
+                for &pid in &project.pids {
+                    kill_pid(pid, &project.path).ok();
+                }
                 tokio::time::sleep(std::time::Duration::from_millis(300)).await;
 
                 let global_secrets = state.secrets.get_all(crate::secrets::GLOBAL);
                 let proj_secrets = state.secrets.get_all(*project_id);
-                let mut env_vars: std::collections::HashMap<String, String> = global_secrets.into_iter().collect();
+                let mut env_vars: std::collections::HashMap<String, String> =
+                    global_secrets.into_iter().collect();
                 env_vars.extend(proj_secrets);
 
                 let mut command = tokio::process::Command::new("sh");
-                command.arg("-c").arg(cmd).current_dir(&project.path)
+                command
+                    .arg("-c")
+                    .arg(cmd)
+                    .current_dir(&project.path)
                     .stdin(std::process::Stdio::null())
                     .stdout(std::process::Stdio::piped())
                     .stderr(std::process::Stdio::piped());
-                for (k, v) in &env_vars { command.env(k, v); }
+                for (k, v) in &env_vars {
+                    command.env(k, v);
+                }
 
                 match command.spawn() {
                     Ok(mut child) => {
-                        capture_logs(&state.logs, child.stdout.take(), child.stderr.take(), *project_id);
+                        capture_logs(
+                            &state.logs,
+                            child.stdout.take(),
+                            child.stderr.take(),
+                            *project_id,
+                        );
                         started += 1;
                     }
                     Err(e) => errors.push(format!("{}: {}", project.name, e)),
@@ -1260,7 +1397,9 @@ pub async fn stop_profile(
     for project_id in &profile.project_ids {
         if let Some(project) = state.registry.get_project(*project_id) {
             for &pid in &project.pids {
-                if kill_pid(pid, &project.path).is_ok() { stopped += 1; }
+                if kill_pid(pid, &project.path).is_ok() {
+                    stopped += 1;
+                }
             }
         }
     }
@@ -1281,11 +1420,22 @@ pub async fn run_project_command(
     Path(id): Path<i64>,
     Json(body): Json<RunCommandBody>,
 ) -> Result<Json<serde_json::Value>, StatusCode> {
-    let project = state.registry.get_project(id).ok_or(StatusCode::NOT_FOUND)?;
+    let project = state
+        .registry
+        .get_project(id)
+        .ok_or(StatusCode::NOT_FOUND)?;
 
     // Safety: block obviously dangerous commands
     let cmd_lower = body.command.to_lowercase();
-    for pattern in &["rm -rf /", "rm -rf ~", "mkfs", "dd if=", "> /dev/sd", ":(){ :|:&", "chmod -R 777 /"] {
+    for pattern in &[
+        "rm -rf /",
+        "rm -rf ~",
+        "mkfs",
+        "dd if=",
+        "> /dev/sd",
+        ":(){ :|:&",
+        "chmod -R 777 /",
+    ] {
         if cmd_lower.contains(pattern) {
             return Ok(Json(serde_json::json!({
                 "status": "error",
@@ -1305,7 +1455,8 @@ pub async fn run_project_command(
             .stdout(std::process::Stdio::piped())
             .stderr(std::process::Stdio::piped())
             .output(),
-    ).await;
+    )
+    .await;
 
     match result {
         Ok(Ok(output)) => {
@@ -1316,12 +1467,20 @@ pub async fn run_project_command(
             // Truncate output to avoid huge responses
             let max_len = 10_000;
             let stdout_str = if stdout.len() > max_len {
-                format!("{}...\n(truncated, {} total bytes)", &stdout[..max_len], stdout.len())
+                format!(
+                    "{}...\n(truncated, {} total bytes)",
+                    &stdout[..max_len],
+                    stdout.len()
+                )
             } else {
                 stdout.to_string()
             };
             let stderr_str = if stderr.len() > max_len {
-                format!("{}...\n(truncated, {} total bytes)", &stderr[..max_len], stderr.len())
+                format!(
+                    "{}...\n(truncated, {} total bytes)",
+                    &stderr[..max_len],
+                    stderr.len()
+                )
             } else {
                 stderr.to_string()
             };
@@ -1335,18 +1494,14 @@ pub async fn run_project_command(
                 "cwd": project.path,
             })))
         }
-        Ok(Err(e)) => {
-            Ok(Json(serde_json::json!({
-                "status": "error",
-                "message": format!("Failed to execute: {}", e),
-            })))
-        }
-        Err(_) => {
-            Ok(Json(serde_json::json!({
-                "status": "timeout",
-                "message": format!("Command timed out after {}s", timeout.as_secs()),
-            })))
-        }
+        Ok(Err(e)) => Ok(Json(serde_json::json!({
+            "status": "error",
+            "message": format!("Failed to execute: {}", e),
+        }))),
+        Err(_) => Ok(Json(serde_json::json!({
+            "status": "timeout",
+            "message": format!("Command timed out after {}s", timeout.as_secs()),
+        }))),
     }
 }
 
@@ -1374,7 +1529,7 @@ pub async fn health_check_port(
                 "http_status": status,
                 "latency_ms": latency_ms,
                 "url": url,
-                "healthy": status >= 200 && status < 400,
+                "healthy": (200..400).contains(&status),
             }))
         }
         Err(e) => {
@@ -1426,7 +1581,8 @@ pub async fn docker_status() -> Json<serde_json::Value> {
     // Get running containers with details
     let output = tokio::process::Command::new("docker")
         .args([
-            "ps", "--format",
+            "ps",
+            "--format",
             "{{.ID}}\t{{.Names}}\t{{.Image}}\t{{.Status}}\t{{.Ports}}\t{{.State}}",
         ])
         .stdout(std::process::Stdio::piped())
@@ -1435,26 +1591,24 @@ pub async fn docker_status() -> Json<serde_json::Value> {
         .await;
 
     let containers: Vec<serde_json::Value> = match output {
-        Ok(out) => {
-            String::from_utf8_lossy(&out.stdout)
-                .lines()
-                .filter(|l| !l.trim().is_empty())
-                .map(|line| {
-                    let parts: Vec<&str> = line.split('\t').collect();
-                    let ports = parts.get(4).unwrap_or(&"");
-                    let port_list: Vec<u16> = parse_docker_ports(ports);
-                    serde_json::json!({
-                        "id": parts.first().unwrap_or(&""),
-                        "name": parts.get(1).unwrap_or(&""),
-                        "image": parts.get(2).unwrap_or(&""),
-                        "status": parts.get(3).unwrap_or(&""),
-                        "ports_raw": ports,
-                        "host_ports": port_list,
-                        "state": parts.get(5).unwrap_or(&""),
-                    })
+        Ok(out) => String::from_utf8_lossy(&out.stdout)
+            .lines()
+            .filter(|l| !l.trim().is_empty())
+            .map(|line| {
+                let parts: Vec<&str> = line.split('\t').collect();
+                let ports = parts.get(4).unwrap_or(&"");
+                let port_list: Vec<u16> = parse_docker_ports(ports);
+                serde_json::json!({
+                    "id": parts.first().unwrap_or(&""),
+                    "name": parts.get(1).unwrap_or(&""),
+                    "image": parts.get(2).unwrap_or(&""),
+                    "status": parts.get(3).unwrap_or(&""),
+                    "ports_raw": ports,
+                    "host_ports": port_list,
+                    "state": parts.get(5).unwrap_or(&""),
                 })
-                .collect()
-        }
+            })
+            .collect(),
         Err(_) => Vec::new(),
     };
 
@@ -1487,7 +1641,10 @@ pub async fn check_deps(
     State(state): State<AppState>,
     Path(id): Path<i64>,
 ) -> Result<Json<serde_json::Value>, StatusCode> {
-    let project = state.registry.get_project(id).ok_or(StatusCode::NOT_FOUND)?;
+    let project = state
+        .registry
+        .get_project(id)
+        .ok_or(StatusCode::NOT_FOUND)?;
     let path = std::path::Path::new(&project.path);
 
     let mut checks = Vec::new();
@@ -1517,7 +1674,9 @@ pub async fn check_deps(
             }));
         } else {
             let lock_mtime = std::fs::metadata(&lockfile).and_then(|m| m.modified()).ok();
-            let nm_mtime = std::fs::metadata(&node_modules).and_then(|m| m.modified()).ok();
+            let nm_mtime = std::fs::metadata(&node_modules)
+                .and_then(|m| m.modified())
+                .ok();
             if let (Some(lock_t), Some(nm_t)) = (lock_mtime, nm_mtime) {
                 if lock_t > nm_t {
                     checks.push(serde_json::json!({
@@ -1549,8 +1708,12 @@ pub async fn check_deps(
                 "fix_command": "cargo build",
             }));
         } else {
-            let lock_mtime = std::fs::metadata(&cargo_lock).and_then(|m| m.modified()).ok();
-            let target_mtime = std::fs::metadata(&target_dir).and_then(|m| m.modified()).ok();
+            let lock_mtime = std::fs::metadata(&cargo_lock)
+                .and_then(|m| m.modified())
+                .ok();
+            let target_mtime = std::fs::metadata(&target_dir)
+                .and_then(|m| m.modified())
+                .ok();
             if let (Some(lock_t), Some(target_t)) = (lock_mtime, target_mtime) {
                 if lock_t > target_t {
                     checks.push(serde_json::json!({
@@ -1585,7 +1748,9 @@ pub async fn check_deps(
             }));
         } else {
             let venv_dir = if venv.exists() { &venv } else { &dot_venv };
-            let req_mtime = std::fs::metadata(&requirements).and_then(|m| m.modified()).ok();
+            let req_mtime = std::fs::metadata(&requirements)
+                .and_then(|m| m.modified())
+                .ok();
             let venv_mtime = std::fs::metadata(venv_dir).and_then(|m| m.modified()).ok();
             if let (Some(req_t), Some(venv_t)) = (req_mtime, venv_mtime) {
                 if req_t > venv_t {
@@ -1619,7 +1784,10 @@ pub async fn check_deps(
     }
 
     let any_stale = checks.iter().any(|c| {
-        c.get("status").and_then(|s| s.as_str()).map(|s| s != "fresh").unwrap_or(false)
+        c.get("status")
+            .and_then(|s| s.as_str())
+            .map(|s| s != "fresh")
+            .unwrap_or(false)
     });
 
     Ok(Json(serde_json::json!({
@@ -1636,7 +1804,10 @@ pub async fn db_status(
     State(state): State<AppState>,
     Path(id): Path<i64>,
 ) -> Result<Json<serde_json::Value>, StatusCode> {
-    let project = state.registry.get_project(id).ok_or(StatusCode::NOT_FOUND)?;
+    let project = state
+        .registry
+        .get_project(id)
+        .ok_or(StatusCode::NOT_FOUND)?;
 
     // Collect env vars to find database URLs
     let global_secrets = state.secrets.get_all(crate::secrets::GLOBAL);
@@ -1644,14 +1815,29 @@ pub async fn db_status(
     let dotenv = crate::env_file::read_env_files(&project.path);
 
     let mut all_env: std::collections::HashMap<String, String> = std::collections::HashMap::new();
-    for (k, v) in global_secrets { all_env.insert(k, v); }
-    for (k, v) in project_secrets { all_env.insert(k, v); }
-    for entry in &dotenv { all_env.insert(entry.key.clone(), entry.value.clone()); }
+    for (k, v) in global_secrets {
+        all_env.insert(k, v);
+    }
+    for (k, v) in project_secrets {
+        all_env.insert(k, v);
+    }
+    for entry in &dotenv {
+        all_env.insert(entry.key.clone(), entry.value.clone());
+    }
 
     // Find database connection strings
-    let db_keys = ["DATABASE_URL", "DB_URL", "POSTGRES_URL", "MYSQL_URL",
-                    "REDIS_URL", "MONGO_URL", "MONGODB_URI", "DB_HOST",
-                    "PGHOST", "MYSQL_HOST"];
+    let db_keys = [
+        "DATABASE_URL",
+        "DB_URL",
+        "POSTGRES_URL",
+        "MYSQL_URL",
+        "REDIS_URL",
+        "MONGO_URL",
+        "MONGODB_URI",
+        "DB_HOST",
+        "PGHOST",
+        "MYSQL_HOST",
+    ];
 
     let mut databases = Vec::new();
 
@@ -1663,7 +1849,10 @@ pub async fn db_status(
                 tokio::time::timeout(
                     std::time::Duration::from_secs(3),
                     tokio::net::TcpStream::connect(format!("{}:{}", host, port)),
-                ).await.map(|r| r.is_ok()).unwrap_or(false)
+                )
+                .await
+                .map(|r| r.is_ok())
+                .unwrap_or(false)
             } else {
                 false
             };
@@ -1685,9 +1874,9 @@ pub async fn db_status(
     for db in docker_dbs {
         // Skip if we already found this DB via env vars
         let port = db.get("port").and_then(|p| p.as_u64()).unwrap_or(0) as u16;
-        let already_listed = databases.iter().any(|d| {
-            d.get("port").and_then(|p| p.as_u64()).unwrap_or(0) as u16 == port
-        });
+        let already_listed = databases
+            .iter()
+            .any(|d| d.get("port").and_then(|p| p.as_u64()).unwrap_or(0) as u16 == port);
         if !already_listed {
             databases.push(db);
         }
@@ -1695,9 +1884,17 @@ pub async fn db_status(
 
     let status = if databases.is_empty() {
         "no_databases_found"
-    } else if databases.iter().all(|d| d.get("reachable").and_then(|r| r.as_bool()).unwrap_or(false)) {
+    } else if databases.iter().all(|d| {
+        d.get("reachable")
+            .and_then(|r| r.as_bool())
+            .unwrap_or(false)
+    }) {
         "all_connected"
-    } else if databases.iter().any(|d| d.get("reachable").and_then(|r| r.as_bool()).unwrap_or(false)) {
+    } else if databases.iter().any(|d| {
+        d.get("reachable")
+            .and_then(|r| r.as_bool())
+            .unwrap_or(false)
+    }) {
         "partial"
     } else {
         "all_unreachable"
@@ -1729,7 +1926,8 @@ fn parse_db_url(key: &str, value: &str) -> DbInfo {
             "mongodb" | "mongodb+srv" => "mongodb",
             "sqlite" | "sqlite3" => "sqlite",
             _ => &scheme,
-        }.to_string();
+        }
+        .to_string();
 
         if let Some(rest) = parts.get(1) {
             // Strip user:pass@ prefix
@@ -1740,20 +1938,42 @@ fn parse_db_url(key: &str, value: &str) -> DbInfo {
             };
             // Parse host:port/dbname
             let (host_port, database) = if let Some(slash) = after_auth.find('/') {
-                (&after_auth[..slash], Some(after_auth[slash + 1..].split('?').next().unwrap_or("").to_string()))
+                (
+                    &after_auth[..slash],
+                    Some(
+                        after_auth[slash + 1..]
+                            .split('?')
+                            .next()
+                            .unwrap_or("")
+                            .to_string(),
+                    ),
+                )
             } else {
                 (after_auth, None)
             };
             let (host, port) = if let Some(colon) = host_port.rfind(':') {
                 let port_str = &host_port[colon + 1..];
-                (Some(host_port[..colon].to_string()), port_str.parse::<u16>().ok())
+                (
+                    Some(host_port[..colon].to_string()),
+                    port_str.parse::<u16>().ok(),
+                )
             } else {
                 (Some(host_port.to_string()), default_port(&db_type))
             };
 
-            return DbInfo { db_type, host, port, database };
+            return DbInfo {
+                db_type,
+                host,
+                port,
+                database,
+            };
         }
-        return DbInfo { db_type, host: None, port: None, database: None };
+        return DbInfo {
+            db_type,
+            host: None,
+            port: None,
+            database: None,
+        };
     }
 
     // Fallback: infer type from key name
@@ -1767,7 +1987,8 @@ fn parse_db_url(key: &str, value: &str) -> DbInfo {
         "mongodb"
     } else {
         "unknown"
-    }.to_string();
+    }
+    .to_string();
 
     // Value might be just a host or host:port
     let (host, port) = if value.contains(':') {
@@ -1777,7 +1998,12 @@ fn parse_db_url(key: &str, value: &str) -> DbInfo {
         (Some(value.to_string()), default_port(&db_type))
     };
 
-    DbInfo { db_type, host, port, database: None }
+    DbInfo {
+        db_type,
+        host,
+        port,
+        database: None,
+    }
 }
 
 fn default_port(db_type: &str) -> Option<u16> {
@@ -1793,7 +2019,11 @@ fn default_port(db_type: &str) -> Option<u16> {
 /// Detect common database containers from Docker
 async fn detect_docker_databases() -> Vec<serde_json::Value> {
     let output = tokio::process::Command::new("docker")
-        .args(["ps", "--format", "{{.Names}}\t{{.Image}}\t{{.Ports}}\t{{.State}}"])
+        .args([
+            "ps",
+            "--format",
+            "{{.Names}}\t{{.Image}}\t{{.Ports}}\t{{.State}}",
+        ])
         .stdout(std::process::Stdio::piped())
         .stderr(std::process::Stdio::piped())
         .output()
@@ -1803,7 +2033,9 @@ async fn detect_docker_databases() -> Vec<serde_json::Value> {
     if let Ok(out) = output {
         for line in String::from_utf8_lossy(&out.stdout).lines() {
             let parts: Vec<&str> = line.split('\t').collect();
-            if parts.len() < 4 { continue; }
+            if parts.len() < 4 {
+                continue;
+            }
             let image = parts[1].to_lowercase();
             let db_type = if image.contains("postgres") {
                 "postgres"
@@ -1825,7 +2057,10 @@ async fn detect_docker_databases() -> Vec<serde_json::Value> {
                 tokio::time::timeout(
                     std::time::Duration::from_secs(2),
                     tokio::net::TcpStream::connect(format!("127.0.0.1:{}", p)),
-                ).await.map(|r| r.is_ok()).unwrap_or(false)
+                )
+                .await
+                .map(|r| r.is_ok())
+                .unwrap_or(false)
             } else {
                 false
             };
@@ -1877,14 +2112,20 @@ pub async fn get_stack_detail(
     Path(id): Path<i64>,
 ) -> Result<Json<serde_json::Value>, StatusCode> {
     let profiles = state.registry.list_profiles();
-    let profile = profiles.into_iter().find(|p| p.id == id)
+    let profile = profiles
+        .into_iter()
+        .find(|p| p.id == id)
         .ok_or(StatusCode::NOT_FOUND)?;
 
     let edges = state.registry.get_dependency_edges(id);
     let mut projects = Vec::new();
     for &pid in &profile.project_ids {
         if let Some(p) = state.registry.get_project(pid) {
-            let status = if !p.ports.is_empty() { "running" } else { "stopped" };
+            let status = if !p.ports.is_empty() {
+                "running"
+            } else {
+                "stopped"
+            };
             projects.push(serde_json::json!({
                 "name": p.name,
                 "id": p.id,
@@ -1897,9 +2138,10 @@ pub async fn get_stack_detail(
         }
     }
 
-    let edge_json: Vec<serde_json::Value> = edges.iter().map(|e| {
-        serde_json::json!({"dependent": e.dependent_id, "requires": e.requires_id})
-    }).collect();
+    let edge_json: Vec<serde_json::Value> = edges
+        .iter()
+        .map(|e| serde_json::json!({"dependent": e.dependent_id, "requires": e.requires_id}))
+        .collect();
 
     Ok(Json(serde_json::json!({
         "status": "ok",
@@ -1910,17 +2152,18 @@ pub async fn get_stack_detail(
 }
 
 /// POST /profiles/{id}/start-stack — start all projects in dependency order
-pub async fn start_stack(
-    State(state): State<AppState>,
-    Path(id): Path<i64>,
-) -> Json<StackResult> {
+pub async fn start_stack(State(state): State<AppState>, Path(id): Path<i64>) -> Json<StackResult> {
     let profiles = state.registry.list_profiles();
     let profile = match profiles.into_iter().find(|p| p.id == id) {
-        None => return Json(StackResult {
-            status: "error".into(),
-            message: format!("Stack not found (profile_id={})", id),
-            services: vec![], failed: vec![], skipped: vec![],
-        }),
+        None => {
+            return Json(StackResult {
+                status: "error".into(),
+                message: format!("Stack not found (profile_id={})", id),
+                services: vec![],
+                failed: vec![],
+                skipped: vec![],
+            })
+        }
         Some(p) => p,
     };
 
@@ -1928,18 +2171,24 @@ pub async fn start_stack(
         return Json(StackResult {
             status: "ok".into(),
             message: format!("Stack '{}' is empty", profile.name),
-            services: vec![], failed: vec![], skipped: vec![],
+            services: vec![],
+            failed: vec![],
+            skipped: vec![],
         });
     }
 
     // Toposort: get start order (requirements first)
     let start_order = match state.registry.toposort_projects(id, &profile.project_ids) {
         Ok(order) => order,
-        Err(e) => return Json(StackResult {
-            status: "error".into(),
-            message: e,
-            services: vec![], failed: vec![], skipped: vec![],
-        }),
+        Err(e) => {
+            return Json(StackResult {
+                status: "error".into(),
+                message: e,
+                services: vec![],
+                failed: vec![],
+                skipped: vec![],
+            })
+        }
     };
 
     let readiness_rules = state.registry.get_readiness_rules(id);
@@ -1956,14 +2205,17 @@ pub async fn start_stack(
         };
 
         // Check if any of this project's requirements failed
-        let blocked = edges.iter().any(|e| {
-            e.dependent_id == project_id && failed_ids.contains(&e.requires_id)
-        });
+        let blocked = edges
+            .iter()
+            .any(|e| e.dependent_id == project_id && failed_ids.contains(&e.requires_id));
         if blocked {
             skipped.push(ServiceStatus {
                 name: project.name.clone(),
                 status: "skipped_dependency".into(),
-                port: None, boot_ms: None, error: None, stderr: None,
+                port: None,
+                boot_ms: None,
+                error: None,
+                stderr: None,
                 reason: Some("dependency failed".into()),
             });
             failed_ids.insert(project_id);
@@ -1976,7 +2228,10 @@ pub async fn start_stack(
                 name: project.name.clone(),
                 status: "already_running".into(),
                 port: project.ports.first().copied(),
-                boot_ms: Some(0), error: None, stderr: None, reason: None,
+                boot_ms: Some(0),
+                error: None,
+                stderr: None,
+                reason: None,
             });
             continue;
         }
@@ -1987,9 +2242,11 @@ pub async fn start_stack(
                 failed.push(ServiceStatus {
                     name: project.name.clone(),
                     status: "no_start_cmd".into(),
-                    port: None, boot_ms: None,
+                    port: None,
+                    boot_ms: None,
                     error: Some("No start command configured".into()),
-                    stderr: None, reason: None,
+                    stderr: None,
+                    reason: None,
                 });
                 failed_ids.insert(project_id);
                 continue;
@@ -2005,7 +2262,8 @@ pub async fn start_stack(
 
         // Spawn process
         let mut cmd = tokio::process::Command::new("sh");
-        cmd.arg("-c").arg(&start_cmd)
+        cmd.arg("-c")
+            .arg(&start_cmd)
             .current_dir(&project.path)
             .stdin(std::process::Stdio::null())
             .stdout(std::process::Stdio::piped())
@@ -2017,13 +2275,17 @@ pub async fn start_stack(
         let start_time = std::time::Instant::now();
         match cmd.spawn() {
             Ok(mut child) => {
-                capture_logs(&state.logs, child.stdout.take(), child.stderr.take(), project_id);
+                capture_logs(
+                    &state.logs,
+                    child.stdout.take(),
+                    child.stderr.take(),
+                    project_id,
+                );
 
                 // Health wait: poll for port bind
                 let rule = readiness_rules.iter().find(|r| r.project_id == project_id);
                 let timeout_secs = rule.map(|r| r.timeout_secs).unwrap_or(30);
-                let check_port = rule.and_then(|r| r.port)
-                    .or(project.preferred_port);
+                let check_port = rule.and_then(|r| r.port).or(project.preferred_port);
 
                 let healthy = if let Some(port) = check_port {
                     wait_for_port(port, timeout_secs).await
@@ -2038,17 +2300,22 @@ pub async fn start_stack(
                     services.push(ServiceStatus {
                         name: project.name.clone(),
                         status: "healthy".into(),
-                        port: check_port, boot_ms: Some(boot_ms),
-                        error: None, stderr: None, reason: None,
+                        port: check_port,
+                        boot_ms: Some(boot_ms),
+                        error: None,
+                        stderr: None,
+                        reason: None,
                     });
                 } else {
                     let stderr_tail = get_stderr_tail(&state.logs, project_id);
                     failed.push(ServiceStatus {
                         name: project.name.clone(),
                         status: "timeout".into(),
-                        port: check_port, boot_ms: Some(boot_ms),
+                        port: check_port,
+                        boot_ms: Some(boot_ms),
                         error: Some(format!("Health check timed out after {}s", timeout_secs)),
-                        stderr: Some(stderr_tail), reason: None,
+                        stderr: Some(stderr_tail),
+                        reason: None,
                     });
                     failed_ids.insert(project_id);
                 }
@@ -2057,9 +2324,11 @@ pub async fn start_stack(
                 failed.push(ServiceStatus {
                     name: project.name.clone(),
                     status: "spawn_failed".into(),
-                    port: None, boot_ms: None,
+                    port: None,
+                    boot_ms: None,
                     error: Some(format!("Failed to spawn: {}", e)),
-                    stderr: None, reason: None,
+                    stderr: None,
+                    reason: None,
                 });
                 failed_ids.insert(project_id);
             }
@@ -2077,12 +2346,28 @@ pub async fn start_stack(
     };
     let message = format!(
         "Stack '{}' started ({}/{} healthy{}{})",
-        profile.name, healthy_count, total,
-        if !failed.is_empty() { format!(", {} failed", failed.len()) } else { String::new() },
-        if !skipped.is_empty() { format!(", {} skipped", skipped.len()) } else { String::new() },
+        profile.name,
+        healthy_count,
+        total,
+        if !failed.is_empty() {
+            format!(", {} failed", failed.len())
+        } else {
+            String::new()
+        },
+        if !skipped.is_empty() {
+            format!(", {} skipped", skipped.len())
+        } else {
+            String::new()
+        },
     );
 
-    Json(StackResult { status, message, services, failed, skipped })
+    Json(StackResult {
+        status,
+        message,
+        services,
+        failed,
+        skipped,
+    })
 }
 
 /// POST /profiles/{id}/stop-stack — stop all projects in reverse dependency order
@@ -2106,7 +2391,8 @@ pub async fn stop_stack(
 
     // Collect all running PIDs across all projects for shared-dep check
     let all_projects = state.registry.get_all_projects();
-    let running_pids: std::collections::HashSet<u32> = all_projects.iter()
+    let running_pids: std::collections::HashSet<u32> = all_projects
+        .iter()
         .flat_map(|p| p.pids.iter().copied())
         .collect();
 
@@ -2124,7 +2410,10 @@ pub async fn stop_stack(
         }
 
         // Check if this project is used by another running profile
-        if state.registry.is_project_in_other_running_profiles(project_id, id, &running_pids) {
+        if state
+            .registry
+            .is_project_in_other_running_profiles(project_id, id, &running_pids)
+        {
             skipped_shared.push(project.name.clone());
             continue;
         }
@@ -2149,7 +2438,9 @@ pub async fn diagnose_stack(
     Path(id): Path<i64>,
 ) -> Result<Json<serde_json::Value>, StatusCode> {
     let profiles = state.registry.list_profiles();
-    let profile = profiles.into_iter().find(|p| p.id == id)
+    let profile = profiles
+        .into_iter()
+        .find(|p| p.id == id)
         .ok_or(StatusCode::NOT_FOUND)?;
 
     let edges = state.registry.get_dependency_edges(id);
@@ -2172,10 +2463,13 @@ pub async fn diagnose_stack(
         } else {
             let stderr_tail = get_stderr_tail(&state.logs, project_id);
             // Check if this is a root cause (its dependencies are healthy)
-            let deps_healthy = edges.iter()
+            let deps_healthy = edges
+                .iter()
                 .filter(|e| e.dependent_id == project_id)
                 .all(|e| {
-                    state.registry.get_project(e.requires_id)
+                    state
+                        .registry
+                        .get_project(e.requires_id)
                         .map(|p| !p.ports.is_empty())
                         .unwrap_or(false)
                 });
@@ -2189,10 +2483,13 @@ pub async fn diagnose_stack(
                 }));
             } else {
                 // Find which dependency is down
-                let down_deps: Vec<String> = edges.iter()
+                let down_deps: Vec<String> = edges
+                    .iter()
                     .filter(|e| e.dependent_id == project_id)
                     .filter_map(|e| {
-                        state.registry.get_project(e.requires_id)
+                        state
+                            .registry
+                            .get_project(e.requires_id)
                             .filter(|p| p.ports.is_empty())
                             .map(|p| p.name.clone())
                     })
@@ -2215,8 +2512,14 @@ pub async fn diagnose_stack(
 
     // Template suggestion
     let suggestion = if let Some(root) = root_causes.first() {
-        let name = root.get("name").and_then(|n| n.as_str()).unwrap_or("unknown");
-        let err = root.get("last_error").and_then(|e| e.as_str()).unwrap_or("unknown error");
+        let name = root
+            .get("name")
+            .and_then(|n| n.as_str())
+            .unwrap_or("unknown");
+        let err = root
+            .get("last_error")
+            .and_then(|e| e.as_str())
+            .unwrap_or("unknown error");
         format!("{} crashed with: {} — try restarting it", name, err)
     } else {
         String::new()
@@ -2237,7 +2540,9 @@ pub async fn validate_env(
     Path(id): Path<i64>,
 ) -> Result<Json<serde_json::Value>, StatusCode> {
     let profiles = state.registry.list_profiles();
-    let profile = profiles.into_iter().find(|p| p.id == id)
+    let profile = profiles
+        .into_iter()
+        .find(|p| p.id == id)
         .ok_or(StatusCode::NOT_FOUND)?;
 
     let mut issues = Vec::new();
@@ -2297,7 +2602,11 @@ pub async fn validate_env(
         }
     }
 
-    let status = if issues.is_empty() { "ok" } else { "issues_found" };
+    let status = if issues.is_empty() {
+        "ok"
+    } else {
+        "issues_found"
+    };
     Ok(Json(serde_json::json!({
         "status": status,
         "issues": issues,
@@ -2325,7 +2634,9 @@ fn extract_env_refs(cmd: &str) -> Vec<String> {
                 // $VAR pattern
                 let start = i + 1;
                 let mut end = start;
-                while end < bytes.len() && (bytes[end].is_ascii_alphanumeric() || bytes[end] == b'_') {
+                while end < bytes.len()
+                    && (bytes[end].is_ascii_alphanumeric() || bytes[end] == b'_')
+                {
                     end += 1;
                 }
                 vars.push(cmd[start..end].to_string());
@@ -2342,7 +2653,10 @@ fn extract_env_refs(cmd: &str) -> Vec<String> {
 async fn wait_for_port(port: u16, timeout_secs: u32) -> bool {
     let deadline = std::time::Instant::now() + std::time::Duration::from_secs(timeout_secs as u64);
     while std::time::Instant::now() < deadline {
-        if tokio::net::TcpStream::connect(format!("127.0.0.1:{}", port)).await.is_ok() {
+        if tokio::net::TcpStream::connect(format!("127.0.0.1:{}", port))
+            .await
+            .is_ok()
+        {
             return true;
         }
         tokio::time::sleep(std::time::Duration::from_millis(500)).await;
@@ -2353,7 +2667,8 @@ async fn wait_for_port(port: u16, timeout_secs: u32) -> bool {
 /// Get the last few stderr lines from LogStore for a project.
 fn get_stderr_tail(logs: &std::sync::Arc<crate::logs::LogStore>, project_id: i64) -> String {
     let lines = logs.get(project_id, 10);
-    lines.iter()
+    lines
+        .iter()
         .filter(|l| l.stream == "stderr")
         .map(|l| l.text.clone())
         .collect::<Vec<_>>()

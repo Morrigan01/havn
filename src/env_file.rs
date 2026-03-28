@@ -58,8 +58,8 @@ pub fn read_env_files(project_path: &str) -> Vec<EnvEntry> {
 /// Update a single key's value inside `file_path`, writing the change in-place.
 /// Returns an error string if the key is not found or the file cannot be written.
 pub fn update_env_key(file_path: &str, key: &str, new_value: &str) -> Result<(), String> {
-    let content = std::fs::read_to_string(file_path)
-        .map_err(|e| format!("Cannot read {file_path}: {e}"))?;
+    let content =
+        std::fs::read_to_string(file_path).map_err(|e| format!("Cannot read {file_path}: {e}"))?;
 
     let prefix = format!("{key}=");
     let mut found = false;
@@ -87,8 +87,7 @@ pub fn update_env_key(file_path: &str, key: &str, new_value: &str) -> Result<(),
         new_content.push('\n');
     }
 
-    std::fs::write(file_path, new_content)
-        .map_err(|e| format!("Cannot write {file_path}: {e}"))
+    std::fs::write(file_path, new_content).map_err(|e| format!("Cannot write {file_path}: {e}"))
 }
 
 // ─── helpers ──────────────────────────────────────────────────────────────────
@@ -117,9 +116,7 @@ fn strip_quotes(s: &str) -> &str {
 
 fn quote_value(value: &str) -> String {
     // Only quote if the value contains whitespace, #, or is empty
-    if value.is_empty()
-        || value.contains(|c: char| c.is_whitespace() || c == '#')
-    {
+    if value.is_empty() || value.contains(|c: char| c.is_whitespace() || c == '#') {
         format!("\"{}\"", value.replace('\\', "\\\\").replace('"', "\\\""))
     } else {
         value.to_string()

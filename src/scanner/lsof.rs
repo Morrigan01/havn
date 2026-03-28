@@ -15,7 +15,10 @@ pub fn parse_lsof_ports(output: &str) -> Vec<PortEntry> {
             if let Some(pid) = current_pid {
                 if let Some(port) = parse_port_from_name(name.trim()) {
                     // Deduplicate IPv4/IPv6 — same port+pid counts once
-                    if !entries.iter().any(|e: &PortEntry| e.port == port && e.pid == pid) {
+                    if !entries
+                        .iter()
+                        .any(|e: &PortEntry| e.port == port && e.pid == pid)
+                    {
                         entries.push(PortEntry { port, pid });
                     }
                 }
@@ -78,7 +81,11 @@ pub async fn resolve_cwds(pids: &[u32]) -> HashMap<u32, String> {
         return HashMap::new();
     }
 
-    let pid_list: String = pids.iter().map(|p| p.to_string()).collect::<Vec<_>>().join(",");
+    let pid_list: String = pids
+        .iter()
+        .map(|p| p.to_string())
+        .collect::<Vec<_>>()
+        .join(",");
 
     let output = tokio::process::Command::new("lsof")
         .args(["-a", "-d", "cwd", "-Fn", "-p", &pid_list])

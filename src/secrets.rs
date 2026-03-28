@@ -19,12 +19,16 @@ pub struct SecretStore {
 impl SecretStore {
     pub fn new(registry: Arc<Registry>) -> Self {
         let master_key = load_or_create_master_key();
-        Self { master_key, registry }
+        Self {
+            master_key,
+            registry,
+        }
     }
 
     pub fn set(&self, project_id: i64, key: &str, value: &str) {
         let (nonce, ciphertext) = encrypt(&self.master_key, value);
-        self.registry.set_secret(project_id, key, &nonce, &ciphertext);
+        self.registry
+            .set_secret(project_id, key, &nonce, &ciphertext);
     }
 
     pub fn get(&self, project_id: i64, key: &str) -> Option<String> {

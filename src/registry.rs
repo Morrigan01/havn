@@ -39,7 +39,7 @@ pub struct DependencyEdge {
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct ReadinessRule {
     pub project_id: i64,
-    pub kind: String,      // "port_bind" or "http_ok"
+    pub kind: String, // "port_bind" or "http_ok"
     pub port: Option<u16>,
     pub path: Option<String>, // for http_ok, e.g. "/health"
     pub timeout_secs: u32,
@@ -65,7 +65,8 @@ impl Registry {
             }
         };
 
-        conn.execute_batch("PRAGMA journal_mode=WAL; PRAGMA foreign_keys=ON;").ok();
+        conn.execute_batch("PRAGMA journal_mode=WAL; PRAGMA foreign_keys=ON;")
+            .ok();
 
         // Try migration — if it fails, the DB is corrupt
         if Self::try_migrate(&conn).is_err() {
@@ -74,7 +75,8 @@ impl Registry {
             let corrupt = db_path.with_extension("db.corrupt");
             std::fs::rename(db_path, &corrupt).ok();
             let conn = Connection::open(db_path).expect("Failed to create fresh DB");
-            conn.execute_batch("PRAGMA journal_mode=WAL; PRAGMA foreign_keys=ON;").ok();
+            conn.execute_batch("PRAGMA journal_mode=WAL; PRAGMA foreign_keys=ON;")
+                .ok();
             Self::try_migrate(&conn).expect("Migration failed on fresh DB");
             return Self {
                 conn: Mutex::new(conn),
@@ -158,8 +160,9 @@ impl Registry {
         // Clean up orphan rows from before FK enforcement
         conn.execute_batch(
             "DELETE FROM profile_projects WHERE profile_id NOT IN (SELECT id FROM profiles);
-             DELETE FROM profile_projects WHERE project_id NOT IN (SELECT id FROM projects);"
-        ).ok();
+             DELETE FROM profile_projects WHERE project_id NOT IN (SELECT id FROM projects);",
+        )
+        .ok();
 
         Ok(())
     }
@@ -200,7 +203,13 @@ impl Registry {
                 tx.execute(
                     "INSERT INTO projects (path, name, framework, start_cmd, last_seen) \
                      VALUES (?1, ?2, ?3, ?4, ?5)",
-                    rusqlite::params![project_root, project_name, result.framework, result.start_cmd, now],
+                    rusqlite::params![
+                        project_root,
+                        project_name,
+                        result.framework,
+                        result.start_cmd,
+                        now
+                    ],
                 )
                 .ok();
                 let id = tx.last_insert_rowid();
@@ -238,9 +247,9 @@ impl Registry {
 
         // Mark stopped ports: any active port_history entries whose port is not in current results
         let active_ports: Vec<u16> = results.iter().map(|r| r.port).collect();
-        if let Ok(mut stmt) = tx.prepare(
-            "SELECT id, project_id, port FROM port_history WHERE stopped_at IS NULL",
-        ) {
+        if let Ok(mut stmt) =
+            tx.prepare("SELECT id, project_id, port FROM port_history WHERE stopped_at IS NULL")
+        {
             let rows: Vec<(i64, i64, u16)> = stmt
                 .query_map([], |row| Ok((row.get(0)?, row.get(1)?, row.get(2)?)))
                 .unwrap()
@@ -424,12 +433,11 @@ impl Registry {
 
     pub fn list_secret_keys(&self, project_id: i64) -> Vec<String> {
         let conn = self.conn.lock().unwrap();
-        let mut stmt = match conn
-            .prepare("SELECT key FROM secrets WHERE project_id = ?1 ORDER BY key")
-        {
-            Ok(s) => s,
-            Err(_) => return vec![],
-        };
+        let mut stmt =
+            match conn.prepare("SELECT key FROM secrets WHERE project_id = ?1 ORDER BY key") {
+                Ok(s) => s,
+                Err(_) => return vec![],
+            };
         let result: Vec<String> = match stmt.query_map([project_id], |row| row.get(0)) {
             Ok(rows) => rows.filter_map(|r| r.ok()).collect(),
             Err(_) => vec![],
@@ -460,11 +468,22 @@ impl Registry {
 
     pub fn remove_project(&self, id: i64) {
         let conn = self.conn.lock().unwrap();
-        conn.execute("DELETE FROM port_history WHERE project_id = ?1", [id]).ok();
-        conn.execute("DELETE FROM profile_projects WHERE project_id = ?1", [id]).ok();
-        conn.execute("DELETE FROM dependency_edges WHERE dependent_id = ?1 OR requires_id = ?1", [id]).ok();
-        conn.execute("DELETE FROM profile_project_config WHERE project_id = ?1", [id]).ok();
-        conn.execute("DELETE FROM projects WHERE id = ?1", [id]).ok();
+        conn.execute("DELETE FROM port_history WHERE project_id = ?1", [id])
+            .ok();
+        conn.execute("DELETE FROM profile_projects WHERE project_id = ?1", [id])
+            .ok();
+        conn.execute(
+            "DELETE FROM dependency_edges WHERE dependent_id = ?1 OR requires_id = ?1",
+            [id],
+        )
+        .ok();
+        conn.execute(
+            "DELETE FROM profile_project_config WHERE project_id = ?1",
+            [id],
+        )
+        .ok();
+        conn.execute("DELETE FROM projects WHERE id = ?1", [id])
+            .ok();
     }
 
     #[allow(dead_code)]
@@ -482,42 +501,52 @@ impl Registry {
         conn.execute(
             "INSERT INTO profiles (name, created_at) VALUES (?1, ?2)",
             rusqlite::params![name, now],
-        ).map_err(|e| e.to_string())?;
+        )
+        .map_err(|e| e.to_string())?;
         Ok(conn.last_insert_rowid())
     }
 
     pub fn list_profiles(&self) -> Vec<Profile> {
         let conn = self.conn.lock().unwrap();
-        let mut stmt = match conn.prepare(
-            "SELECT id, name, created_at FROM profiles ORDER BY created_at"
-        ) {
-            Ok(s) => s,
-            Err(_) => return Vec::new(),
-        };
+        let mut stmt =
+            match conn.prepare("SELECT id, name, created_at FROM profiles ORDER BY created_at") {
+                Ok(s) => s,
+                Err(_) => return Vec::new(),
+            };
         let profiles: Vec<(i64, String, String)> = stmt
             .query_map([], |row| Ok((row.get(0)?, row.get(1)?, row.get(2)?)))
             .unwrap()
             .filter_map(|r| r.ok())
             .collect();
 
-        profiles.into_iter().map(|(id, name, created_at)| {
-            let project_ids = conn
-                .prepare("SELECT project_id FROM profile_projects WHERE profile_id = ?1")
-                .ok()
-                .and_then(|mut s| {
-                    s.query_map([id], |r| r.get::<_, i64>(0)).ok().map(|rows| {
-                        rows.filter_map(|r| r.ok()).collect()
+        profiles
+            .into_iter()
+            .map(|(id, name, created_at)| {
+                let project_ids = conn
+                    .prepare("SELECT project_id FROM profile_projects WHERE profile_id = ?1")
+                    .ok()
+                    .and_then(|mut s| {
+                        s.query_map([id], |r| r.get::<_, i64>(0))
+                            .ok()
+                            .map(|rows| rows.filter_map(|r| r.ok()).collect())
                     })
-                })
-                .unwrap_or_default();
-            Profile { id, name, project_ids, created_at }
-        }).collect()
+                    .unwrap_or_default();
+                Profile {
+                    id,
+                    name,
+                    project_ids,
+                    created_at,
+                }
+            })
+            .collect()
     }
 
     pub fn delete_profile(&self, id: i64) {
         let conn = self.conn.lock().unwrap();
-        conn.execute("DELETE FROM profile_projects WHERE profile_id = ?1", [id]).ok();
-        conn.execute("DELETE FROM profiles WHERE id = ?1", [id]).ok();
+        conn.execute("DELETE FROM profile_projects WHERE profile_id = ?1", [id])
+            .ok();
+        conn.execute("DELETE FROM profiles WHERE id = ?1", [id])
+            .ok();
     }
 
     pub fn add_project_to_profile(&self, profile_id: i64, project_id: i64) {
@@ -525,7 +554,8 @@ impl Registry {
         conn.execute(
             "INSERT OR IGNORE INTO profile_projects (profile_id, project_id) VALUES (?1, ?2)",
             rusqlite::params![profile_id, project_id],
-        ).ok();
+        )
+        .ok();
     }
 
     pub fn remove_project_from_profile(&self, profile_id: i64, project_id: i64) {
@@ -533,12 +563,19 @@ impl Registry {
         conn.execute(
             "DELETE FROM profile_projects WHERE profile_id = ?1 AND project_id = ?2",
             rusqlite::params![profile_id, project_id],
-        ).ok();
+        )
+        .ok();
     }
 
     // ── Dependency Edges ─────────────────────────────────────────────────────
 
-    pub fn add_dependency_edge(&self, profile_id: i64, dependent_id: i64, requires_id: i64) -> Result<(), String> {
+    #[allow(dead_code)]
+    pub fn add_dependency_edge(
+        &self,
+        profile_id: i64,
+        dependent_id: i64,
+        requires_id: i64,
+    ) -> Result<(), String> {
         if dependent_id == requires_id {
             return Err("A project cannot depend on itself".to_string());
         }
@@ -552,9 +589,9 @@ impl Registry {
 
     pub fn get_dependency_edges(&self, profile_id: i64) -> Vec<DependencyEdge> {
         let conn = self.conn.lock().unwrap();
-        let mut stmt = match conn.prepare(
-            "SELECT dependent_id, requires_id FROM dependency_edges WHERE profile_id = ?1"
-        ) {
+        let mut stmt = match conn
+            .prepare("SELECT dependent_id, requires_id FROM dependency_edges WHERE profile_id = ?1")
+        {
             Ok(s) => s,
             Err(_) => return Vec::new(),
         };
@@ -563,9 +600,13 @@ impl Registry {
                 dependent_id: row.get(0)?,
                 requires_id: row.get(1)?,
             })
-        }).unwrap().filter_map(|r| r.ok()).collect()
+        })
+        .unwrap()
+        .filter_map(|r| r.ok())
+        .collect()
     }
 
+    #[allow(dead_code)]
     pub fn remove_dependency_edge(&self, profile_id: i64, dependent_id: i64, requires_id: i64) {
         let conn = self.conn.lock().unwrap();
         conn.execute(
@@ -576,6 +617,7 @@ impl Registry {
 
     // ── Readiness Rules ──────────────────────────────────────────────────────
 
+    #[allow(dead_code)]
     pub fn set_readiness_rule(&self, profile_id: i64, rule: &ReadinessRule) {
         let conn = self.conn.lock().unwrap();
         conn.execute(
@@ -592,7 +634,7 @@ impl Registry {
         let conn = self.conn.lock().unwrap();
         let mut stmt = match conn.prepare(
             "SELECT project_id, readiness_kind, readiness_port, readiness_path, timeout_secs \
-             FROM profile_project_config WHERE profile_id = ?1"
+             FROM profile_project_config WHERE profile_id = ?1",
         ) {
             Ok(s) => s,
             Err(_) => return Vec::new(),
@@ -605,21 +647,33 @@ impl Registry {
                 path: row.get(3)?,
                 timeout_secs: row.get::<_, u32>(4)?,
             })
-        }).unwrap().filter_map(|r| r.ok()).collect()
+        })
+        .unwrap()
+        .filter_map(|r| r.ok())
+        .collect()
     }
 
     // ── Toposort ─────────────────────────────────────────────────────────────
 
     /// Topologically sort project IDs based on dependency edges.
     /// Returns Err with cycle path if a cycle is detected.
-    pub fn toposort_projects(&self, profile_id: i64, project_ids: &[i64]) -> Result<Vec<i64>, String> {
+    pub fn toposort_projects(
+        &self,
+        profile_id: i64,
+        project_ids: &[i64],
+    ) -> Result<Vec<i64>, String> {
         let edges = self.get_dependency_edges(profile_id);
         toposort(project_ids, &edges)
     }
 
     /// Check if a project is actively used in any OTHER running profile.
     /// Used by stop_stack to avoid killing shared dependencies.
-    pub fn is_project_in_other_running_profiles(&self, project_id: i64, exclude_profile_id: i64, running_pids: &std::collections::HashSet<u32>) -> bool {
+    pub fn is_project_in_other_running_profiles(
+        &self,
+        project_id: i64,
+        exclude_profile_id: i64,
+        running_pids: &std::collections::HashSet<u32>,
+    ) -> bool {
         let profiles = self.list_profiles();
         for profile in profiles {
             if profile.id == exclude_profile_id {
@@ -630,7 +684,9 @@ impl Registry {
             }
             // Check if any other project in this profile is running
             for &other_id in &profile.project_ids {
-                if other_id == project_id { continue; }
+                if other_id == project_id {
+                    continue;
+                }
                 if let Some(p) = self.get_project(other_id) {
                     for pid in &p.pids {
                         if running_pids.contains(pid) {
@@ -658,7 +714,9 @@ pub fn toposort(project_ids: &[i64], edges: &[DependencyEdge]) -> Result<Vec<i64
     }
     for edge in edges {
         if id_set.contains(&edge.dependent_id) && id_set.contains(&edge.requires_id) {
-            deps.entry(edge.dependent_id).or_default().push(edge.requires_id);
+            deps.entry(edge.dependent_id)
+                .or_default()
+                .push(edge.requires_id);
         }
     }
 
@@ -861,7 +919,9 @@ mod tests {
         let events = registry.update_from_scan(&[]);
 
         // Should have a PortStopped event
-        let has_stop = events.iter().any(|e| matches!(e, crate::ws::WsEvent::PortStopped { .. }));
+        let has_stop = events
+            .iter()
+            .any(|e| matches!(e, crate::ws::WsEvent::PortStopped { .. }));
         assert!(has_stop);
     }
 
@@ -889,8 +949,14 @@ mod tests {
     fn test_toposort_linear_chain() {
         // A depends on B, B depends on C → start order: C, B, A
         let edges = vec![
-            DependencyEdge { dependent_id: 1, requires_id: 2 },
-            DependencyEdge { dependent_id: 2, requires_id: 3 },
+            DependencyEdge {
+                dependent_id: 1,
+                requires_id: 2,
+            },
+            DependencyEdge {
+                dependent_id: 2,
+                requires_id: 3,
+            },
         ];
         let result = toposort(&[1, 2, 3], &edges).unwrap();
         assert_eq!(result, vec![3, 2, 1]);
@@ -900,10 +966,22 @@ mod tests {
     fn test_toposort_diamond() {
         // A depends on B and C, B depends on D, C depends on D
         let edges = vec![
-            DependencyEdge { dependent_id: 1, requires_id: 2 },
-            DependencyEdge { dependent_id: 1, requires_id: 3 },
-            DependencyEdge { dependent_id: 2, requires_id: 4 },
-            DependencyEdge { dependent_id: 3, requires_id: 4 },
+            DependencyEdge {
+                dependent_id: 1,
+                requires_id: 2,
+            },
+            DependencyEdge {
+                dependent_id: 1,
+                requires_id: 3,
+            },
+            DependencyEdge {
+                dependent_id: 2,
+                requires_id: 4,
+            },
+            DependencyEdge {
+                dependent_id: 3,
+                requires_id: 4,
+            },
         ];
         let result = toposort(&[1, 2, 3, 4], &edges).unwrap();
         // D must come first, A must come last
@@ -914,8 +992,14 @@ mod tests {
     #[test]
     fn test_toposort_cycle_detected() {
         let edges = vec![
-            DependencyEdge { dependent_id: 1, requires_id: 2 },
-            DependencyEdge { dependent_id: 2, requires_id: 1 },
+            DependencyEdge {
+                dependent_id: 1,
+                requires_id: 2,
+            },
+            DependencyEdge {
+                dependent_id: 2,
+                requires_id: 1,
+            },
         ];
         let result = toposort(&[1, 2], &edges);
         assert!(result.is_err());
@@ -930,9 +1014,10 @@ mod tests {
 
     #[test]
     fn test_toposort_self_reference_is_cycle() {
-        let edges = vec![
-            DependencyEdge { dependent_id: 1, requires_id: 1 },
-        ];
+        let edges = vec![DependencyEdge {
+            dependent_id: 1,
+            requires_id: 1,
+        }];
         let result = toposort(&[1], &edges);
         assert!(result.is_err());
     }

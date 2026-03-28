@@ -110,16 +110,7 @@ fn kqueue_thread(pid_rx: std::sync::mpsc::Receiver<Vec<u32>>, notify: Arc<Notify
             tv_nsec: 200_000_000,
         };
         let mut out_ev = std::mem::MaybeUninit::<libc::kevent>::uninit();
-        let n = unsafe {
-            libc::kevent(
-                kq,
-                std::ptr::null(),
-                0,
-                out_ev.as_mut_ptr(),
-                1,
-                &ts,
-            )
-        };
+        let n = unsafe { libc::kevent(kq, std::ptr::null(), 0, out_ev.as_mut_ptr(), 1, &ts) };
 
         if n > 0 {
             let event = unsafe { out_ev.assume_init() };
