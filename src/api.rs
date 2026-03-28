@@ -1228,7 +1228,7 @@ pub async fn open_terminal(
     {
         for term in &["x-terminal-emulator", "gnome-terminal", "xterm"] {
             if std::process::Command::new(term)
-                .arg(&format!("--working-directory={}", project.path))
+                .arg(format!("--working-directory={}", project.path))
                 .spawn()
                 .is_ok()
             {
