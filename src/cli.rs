@@ -1,4 +1,5 @@
-use clap::{Parser, Subcommand};
+use clap::{CommandFactory, Parser, Subcommand};
+use clap_complete::{generate, Shell};
 use std::path::PathBuf;
 
 #[derive(Parser)]
@@ -81,6 +82,11 @@ pub enum Command {
     Update,
     /// List all MCP tools available to AI agents
     Tools,
+    /// Generate shell completions for bash, zsh, fish, or powershell
+    Completions {
+        /// Shell to generate completions for
+        shell: Shell,
+    },
 }
 
 #[derive(Subcommand)]
@@ -519,6 +525,11 @@ pub fn list_tools() {
     println!("UTILITY");
     println!("  find_port_for_project  Look up which port(s) a project uses");
     println!("  find_available_port    Find a free TCP port");
+}
+
+pub fn completions(shell: Shell) {
+    let mut cmd = Cli::command();
+    generate(shell, &mut cmd, "havn", &mut std::io::stdout());
 }
 
 const GITHUB_REPO: &str = "Morrigan01/havn";

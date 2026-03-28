@@ -36,6 +36,7 @@ async fn main() {
         Some(cli::Command::Secret { action }) => cli::secret(&args, action).await,
         Some(cli::Command::Update) => cli::update().await,
         Some(cli::Command::Tools) => cli::list_tools(),
+        Some(cli::Command::Completions { shell }) => cli::completions(*shell),
         None => {
             cli::check_for_update_notice().await;
             let bind = args.bind.clone();

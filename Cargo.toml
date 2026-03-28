@@ -1,6 +1,6 @@
 [package]
 name = "havn"
-version = "0.2.1"
+version = "0.3.0"
 edition = "2021"
 description = "Map local ports to project directories — CLI, dashboard, and MCP server"
 license = "BSL-1.1"
@@ -30,6 +30,7 @@ libc = "0.2"
 aes-gcm = "0.10"
 rand = "0.8"
 futures = "0.3"
+clap_complete = "4"
 
 [dev-dependencies]
 reqwest = { version = "0.12", features = ["json"] }
