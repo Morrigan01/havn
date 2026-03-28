@@ -1267,6 +1267,520 @@ pub async fn stop_profile(
     Json(serde_json::json!({"stopped": stopped}))
 }
 
+// ── Stack Orchestration Endpoints ─────────────────────────────────────────────
+
+#[derive(Serialize)]
+pub struct ServiceStatus {
+    pub name: String,
+    pub status: String,
+    pub port: Option<u16>,
+    pub boot_ms: Option<u64>,
+    pub error: Option<String>,
+    pub stderr: Option<String>,
+    pub reason: Option<String>,
+}
+
+#[derive(Serialize)]
+pub struct StackResult {
+    pub status: String,
+    pub message: String,
+    #[serde(skip_serializing_if = "Vec::is_empty")]
+    pub services: Vec<ServiceStatus>,
+    #[serde(skip_serializing_if = "Vec::is_empty")]
+    pub failed: Vec<ServiceStatus>,
+    #[serde(skip_serializing_if = "Vec::is_empty")]
+    pub skipped: Vec<ServiceStatus>,
+}
+
+/// GET /profiles/{id}/detail — detailed stack status with per-project health
+pub async fn get_stack_detail(
+    State(state): State<AppState>,
+    Path(id): Path<i64>,
+) -> Result<Json<serde_json::Value>, StatusCode> {
+    let profiles = state.registry.list_profiles();
+    let profile = profiles.into_iter().find(|p| p.id == id)
+        .ok_or(StatusCode::NOT_FOUND)?;
+
+    let edges = state.registry.get_dependency_edges(id);
+    let mut projects = Vec::new();
+    for &pid in &profile.project_ids {
+        if let Some(p) = state.registry.get_project(pid) {
+            let status = if !p.ports.is_empty() { "running" } else { "stopped" };
+            projects.push(serde_json::json!({
+                "name": p.name,
+                "id": p.id,
+                "status": status,
+                "ports": p.ports,
+                "uptime_seconds": p.uptime_seconds,
+                "framework": p.framework,
+                "start_cmd": p.start_cmd,
+            }));
+        }
+    }
+
+    let edge_json: Vec<serde_json::Value> = edges.iter().map(|e| {
+        serde_json::json!({"dependent": e.dependent_id, "requires": e.requires_id})
+    }).collect();
+
+    Ok(Json(serde_json::json!({
+        "status": "ok",
+        "name": profile.name,
+        "projects": projects,
+        "dependency_edges": edge_json,
+    })))
+}
+
+/// POST /profiles/{id}/start-stack — start all projects in dependency order
+pub async fn start_stack(
+    State(state): State<AppState>,
+    Path(id): Path<i64>,
+) -> Json<StackResult> {
+    let profiles = state.registry.list_profiles();
+    let profile = match profiles.into_iter().find(|p| p.id == id) {
+        None => return Json(StackResult {
+            status: "error".into(),
+            message: format!("Stack not found (profile_id={})", id),
+            services: vec![], failed: vec![], skipped: vec![],
+        }),
+        Some(p) => p,
+    };
+
+    if profile.project_ids.is_empty() {
+        return Json(StackResult {
+            status: "ok".into(),
+            message: format!("Stack '{}' is empty", profile.name),
+            services: vec![], failed: vec![], skipped: vec![],
+        });
+    }
+
+    // Toposort: get start order (requirements first)
+    let start_order = match state.registry.toposort_projects(id, &profile.project_ids) {
+        Ok(order) => order,
+        Err(e) => return Json(StackResult {
+            status: "error".into(),
+            message: e,
+            services: vec![], failed: vec![], skipped: vec![],
+        }),
+    };
+
+    let readiness_rules = state.registry.get_readiness_rules(id);
+    let mut services = Vec::new();
+    let mut failed = Vec::new();
+    let mut skipped = Vec::new();
+    let mut failed_ids = std::collections::HashSet::new();
+    let edges = state.registry.get_dependency_edges(id);
+
+    for &project_id in &start_order {
+        let project = match state.registry.get_project(project_id) {
+            Some(p) => p,
+            None => continue,
+        };
+
+        // Check if any of this project's requirements failed
+        let blocked = edges.iter().any(|e| {
+            e.dependent_id == project_id && failed_ids.contains(&e.requires_id)
+        });
+        if blocked {
+            skipped.push(ServiceStatus {
+                name: project.name.clone(),
+                status: "skipped_dependency".into(),
+                port: None, boot_ms: None, error: None, stderr: None,
+                reason: Some("dependency failed".into()),
+            });
+            failed_ids.insert(project_id);
+            continue;
+        }
+
+        // Skip if already running
+        if !project.ports.is_empty() {
+            services.push(ServiceStatus {
+                name: project.name.clone(),
+                status: "already_running".into(),
+                port: project.ports.first().copied(),
+                boot_ms: Some(0), error: None, stderr: None, reason: None,
+            });
+            continue;
+        }
+
+        let start_cmd = match &project.start_cmd {
+            Some(cmd) => cmd.clone(),
+            None => {
+                failed.push(ServiceStatus {
+                    name: project.name.clone(),
+                    status: "no_start_cmd".into(),
+                    port: None, boot_ms: None,
+                    error: Some("No start command configured".into()),
+                    stderr: None, reason: None,
+                });
+                failed_ids.insert(project_id);
+                continue;
+            }
+        };
+
+        // Collect env
+        let global_secrets = state.secrets.get_all(crate::secrets::GLOBAL);
+        let project_secrets = state.secrets.get_all(project_id);
+        let mut env_vars: std::collections::HashMap<String, String> =
+            global_secrets.into_iter().collect();
+        env_vars.extend(project_secrets);
+
+        // Spawn process
+        let mut cmd = tokio::process::Command::new("sh");
+        cmd.arg("-c").arg(&start_cmd)
+            .current_dir(&project.path)
+            .stdin(std::process::Stdio::null())
+            .stdout(std::process::Stdio::piped())
+            .stderr(std::process::Stdio::piped());
+        for (k, v) in &env_vars {
+            cmd.env(k, v);
+        }
+
+        let start_time = std::time::Instant::now();
+        match cmd.spawn() {
+            Ok(mut child) => {
+                capture_logs(&state.logs, child.stdout.take(), child.stderr.take(), project_id);
+
+                // Health wait: poll for port bind
+                let rule = readiness_rules.iter().find(|r| r.project_id == project_id);
+                let timeout_secs = rule.map(|r| r.timeout_secs).unwrap_or(30);
+                let check_port = rule.and_then(|r| r.port)
+                    .or(project.preferred_port);
+
+                let healthy = if let Some(port) = check_port {
+                    wait_for_port(port, timeout_secs).await
+                } else {
+                    // No port to check, just wait a moment
+                    tokio::time::sleep(std::time::Duration::from_secs(2)).await;
+                    true
+                };
+
+                let boot_ms = start_time.elapsed().as_millis() as u64;
+                if healthy {
+                    services.push(ServiceStatus {
+                        name: project.name.clone(),
+                        status: "healthy".into(),
+                        port: check_port, boot_ms: Some(boot_ms),
+                        error: None, stderr: None, reason: None,
+                    });
+                } else {
+                    let stderr_tail = get_stderr_tail(&state.logs, project_id);
+                    failed.push(ServiceStatus {
+                        name: project.name.clone(),
+                        status: "timeout".into(),
+                        port: check_port, boot_ms: Some(boot_ms),
+                        error: Some(format!("Health check timed out after {}s", timeout_secs)),
+                        stderr: Some(stderr_tail), reason: None,
+                    });
+                    failed_ids.insert(project_id);
+                }
+            }
+            Err(e) => {
+                failed.push(ServiceStatus {
+                    name: project.name.clone(),
+                    status: "spawn_failed".into(),
+                    port: None, boot_ms: None,
+                    error: Some(format!("Failed to spawn: {}", e)),
+                    stderr: None, reason: None,
+                });
+                failed_ids.insert(project_id);
+            }
+        }
+    }
+
+    let total = services.len() + failed.len() + skipped.len();
+    let healthy_count = services.len();
+    let status = if failed.is_empty() && skipped.is_empty() {
+        "ok".to_string()
+    } else if services.is_empty() {
+        "error".to_string()
+    } else {
+        "partial".to_string()
+    };
+    let message = format!(
+        "Stack '{}' started ({}/{} healthy{}{})",
+        profile.name, healthy_count, total,
+        if !failed.is_empty() { format!(", {} failed", failed.len()) } else { String::new() },
+        if !skipped.is_empty() { format!(", {} skipped", skipped.len()) } else { String::new() },
+    );
+
+    Json(StackResult { status, message, services, failed, skipped })
+}
+
+/// POST /profiles/{id}/stop-stack — stop all projects in reverse dependency order
+pub async fn stop_stack(
+    State(state): State<AppState>,
+    Path(id): Path<i64>,
+) -> Json<serde_json::Value> {
+    let profiles = state.registry.list_profiles();
+    let profile = match profiles.into_iter().find(|p| p.id == id) {
+        None => return Json(serde_json::json!({"status": "error", "message": "Stack not found"})),
+        Some(p) => p,
+    };
+
+    let start_order = match state.registry.toposort_projects(id, &profile.project_ids) {
+        Ok(order) => order,
+        Err(e) => return Json(serde_json::json!({"status": "error", "message": e})),
+    };
+
+    // Reverse order for shutdown (dependents first)
+    let stop_order: Vec<i64> = start_order.into_iter().rev().collect();
+
+    // Collect all running PIDs across all projects for shared-dep check
+    let all_projects = state.registry.get_all_projects();
+    let running_pids: std::collections::HashSet<u32> = all_projects.iter()
+        .flat_map(|p| p.pids.iter().copied())
+        .collect();
+
+    let mut stopped = Vec::new();
+    let mut skipped_shared = Vec::new();
+
+    for project_id in stop_order {
+        let project = match state.registry.get_project(project_id) {
+            Some(p) => p,
+            None => continue,
+        };
+
+        if project.pids.is_empty() {
+            continue; // Already stopped
+        }
+
+        // Check if this project is used by another running profile
+        if state.registry.is_project_in_other_running_profiles(project_id, id, &running_pids) {
+            skipped_shared.push(project.name.clone());
+            continue;
+        }
+
+        for &pid in &project.pids {
+            kill_pid(pid, &project.path).ok();
+        }
+        stopped.push(project.name.clone());
+    }
+
+    Json(serde_json::json!({
+        "status": "ok",
+        "message": format!("Stopped {} services", stopped.len()),
+        "stopped": stopped,
+        "skipped_shared": skipped_shared,
+    }))
+}
+
+/// GET /profiles/{id}/diagnose — trace failures across a stack
+pub async fn diagnose_stack(
+    State(state): State<AppState>,
+    Path(id): Path<i64>,
+) -> Result<Json<serde_json::Value>, StatusCode> {
+    let profiles = state.registry.list_profiles();
+    let profile = profiles.into_iter().find(|p| p.id == id)
+        .ok_or(StatusCode::NOT_FOUND)?;
+
+    let edges = state.registry.get_dependency_edges(id);
+    let mut healthy = Vec::new();
+    let mut unhealthy = Vec::new();
+    let mut root_causes = Vec::new();
+
+    for &project_id in &profile.project_ids {
+        let project = match state.registry.get_project(project_id) {
+            Some(p) => p,
+            None => continue,
+        };
+
+        if !project.ports.is_empty() {
+            healthy.push(serde_json::json!({
+                "name": project.name,
+                "status": "healthy",
+                "ports": project.ports,
+            }));
+        } else {
+            let stderr_tail = get_stderr_tail(&state.logs, project_id);
+            // Check if this is a root cause (its dependencies are healthy)
+            let deps_healthy = edges.iter()
+                .filter(|e| e.dependent_id == project_id)
+                .all(|e| {
+                    state.registry.get_project(e.requires_id)
+                        .map(|p| !p.ports.is_empty())
+                        .unwrap_or(false)
+                });
+
+            if deps_healthy {
+                root_causes.push(serde_json::json!({
+                    "name": project.name,
+                    "status": "crashed",
+                    "last_error": stderr_tail.lines().last().unwrap_or(""),
+                    "stderr_tail": stderr_tail.lines().take(5).collect::<Vec<_>>(),
+                }));
+            } else {
+                // Find which dependency is down
+                let down_deps: Vec<String> = edges.iter()
+                    .filter(|e| e.dependent_id == project_id)
+                    .filter_map(|e| {
+                        state.registry.get_project(e.requires_id)
+                            .filter(|p| p.ports.is_empty())
+                            .map(|p| p.name.clone())
+                    })
+                    .collect();
+
+                unhealthy.push(serde_json::json!({
+                    "name": project.name,
+                    "status": "unhealthy",
+                    "reason": format!("depends on {} (down)", down_deps.join(", ")),
+                }));
+            }
+        }
+    }
+
+    let overall = if root_causes.is_empty() && unhealthy.is_empty() {
+        "healthy"
+    } else {
+        "degraded"
+    };
+
+    // Template suggestion
+    let suggestion = if let Some(root) = root_causes.first() {
+        let name = root.get("name").and_then(|n| n.as_str()).unwrap_or("unknown");
+        let err = root.get("last_error").and_then(|e| e.as_str()).unwrap_or("unknown error");
+        format!("{} crashed with: {} — try restarting it", name, err)
+    } else {
+        String::new()
+    };
+
+    Ok(Json(serde_json::json!({
+        "status": overall,
+        "root_cause": root_causes,
+        "affected": unhealthy,
+        "healthy": healthy,
+        "suggestion": suggestion,
+    })))
+}
+
+/// GET /profiles/{id}/validate-env — pre-flight environment checks
+pub async fn validate_env(
+    State(state): State<AppState>,
+    Path(id): Path<i64>,
+) -> Result<Json<serde_json::Value>, StatusCode> {
+    let profiles = state.registry.list_profiles();
+    let profile = profiles.into_iter().find(|p| p.id == id)
+        .ok_or(StatusCode::NOT_FOUND)?;
+
+    let mut issues = Vec::new();
+    let mut port_map: std::collections::HashMap<u16, String> = std::collections::HashMap::new();
+
+    for &project_id in &profile.project_ids {
+        let project = match state.registry.get_project(project_id) {
+            Some(p) => p,
+            None => continue,
+        };
+
+        // Check: no start_cmd
+        if project.start_cmd.is_none() {
+            issues.push(serde_json::json!({
+                "project": project.name,
+                "type": "no_start_cmd",
+                "message": "No start command configured",
+            }));
+        }
+
+        // Check: port conflicts
+        if let Some(port) = project.preferred_port {
+            if let Some(other) = port_map.get(&port) {
+                issues.push(serde_json::json!({
+                    "project": project.name,
+                    "type": "port_conflict",
+                    "message": format!("Port {} conflicts with {}", port, other),
+                }));
+            } else {
+                port_map.insert(port, project.name.clone());
+            }
+        }
+
+        // Check: missing env vars referenced in start_cmd
+        if let Some(ref cmd) = project.start_cmd {
+            let referenced_vars = extract_env_refs(cmd);
+            let global_secrets = state.secrets.get_all(crate::secrets::GLOBAL);
+            let project_secrets = state.secrets.get_all(project_id);
+            let mut env_vars: std::collections::HashSet<String> =
+                global_secrets.into_iter().map(|(k, _)| k).collect();
+            env_vars.extend(project_secrets.into_iter().map(|(k, _)| k));
+
+            let dotenv_entries = crate::env_file::read_env_files(&project.path);
+            for entry in &dotenv_entries {
+                env_vars.insert(entry.key.clone());
+            }
+
+            for var in referenced_vars {
+                if !env_vars.contains(&var) && std::env::var(&var).is_err() {
+                    issues.push(serde_json::json!({
+                        "project": project.name,
+                        "type": "missing_env",
+                        "message": format!("${} referenced in start_cmd but not found", var),
+                    }));
+                }
+            }
+        }
+    }
+
+    let status = if issues.is_empty() { "ok" } else { "issues_found" };
+    Ok(Json(serde_json::json!({
+        "status": status,
+        "issues": issues,
+    })))
+}
+
+/// Extract $VAR and ${VAR} references from a shell command string.
+fn extract_env_refs(cmd: &str) -> Vec<String> {
+    let mut vars = Vec::new();
+    let bytes = cmd.as_bytes();
+    let mut i = 0;
+    while i < bytes.len() {
+        if bytes[i] == b'$' && i + 1 < bytes.len() {
+            if bytes[i + 1] == b'{' {
+                // ${VAR} pattern
+                if let Some(end) = cmd[i + 2..].find('}') {
+                    let var = &cmd[i + 2..i + 2 + end];
+                    if !var.is_empty() && var.chars().all(|c| c.is_alphanumeric() || c == '_') {
+                        vars.push(var.to_string());
+                    }
+                    i = i + 2 + end + 1;
+                    continue;
+                }
+            } else if bytes[i + 1].is_ascii_alphabetic() || bytes[i + 1] == b'_' {
+                // $VAR pattern
+                let start = i + 1;
+                let mut end = start;
+                while end < bytes.len() && (bytes[end].is_ascii_alphanumeric() || bytes[end] == b'_') {
+                    end += 1;
+                }
+                vars.push(cmd[start..end].to_string());
+                i = end;
+                continue;
+            }
+        }
+        i += 1;
+    }
+    vars
+}
+
+/// Wait for a port to become bound (500ms polling, configurable timeout).
+async fn wait_for_port(port: u16, timeout_secs: u32) -> bool {
+    let deadline = std::time::Instant::now() + std::time::Duration::from_secs(timeout_secs as u64);
+    while std::time::Instant::now() < deadline {
+        if tokio::net::TcpStream::connect(format!("127.0.0.1:{}", port)).await.is_ok() {
+            return true;
+        }
+        tokio::time::sleep(std::time::Duration::from_millis(500)).await;
+    }
+    false
+}
+
+/// Get the last few stderr lines from LogStore for a project.
+fn get_stderr_tail(logs: &std::sync::Arc<crate::logs::LogStore>, project_id: i64) -> String {
+    let lines = logs.get(project_id, 10);
+    lines.iter()
+        .filter(|l| l.stream == "stderr")
+        .map(|l| l.text.clone())
+        .collect::<Vec<_>>()
+        .join("\n")
+}
+
 /// Spawn background tasks to read stdout/stderr of a child process into the log store.
 fn capture_logs(
     logs: &Arc<crate::logs::LogStore>,
@@ -1295,12 +1809,12 @@ fn capture_logs(
     }
 }
 
-/// Kill a process by PID, with validation that it still belongs to the expected project.
-fn kill_pid(pid: u32, expected_path: &str) -> Result<(), String> {
+/// Kill a process by PID and wait for it to die (blocking).
+/// Sends SIGTERM, waits up to 3s, escalates to SIGKILL if needed.
+fn kill_pid(pid: u32, _expected_path: &str) -> Result<(), String> {
     use nix::sys::signal::{kill, Signal};
     use nix::unistd::Pid;
 
-    // Validate PID still exists
     let nix_pid = Pid::from_raw(pid as i32);
 
     // Send SIGTERM first
@@ -1311,19 +1825,24 @@ fn kill_pid(pid: u32, expected_path: &str) -> Result<(), String> {
         format!("Kill failed: {}", e)
     })?;
 
-    // Wait up to 3 seconds for process to die
-    let _ = expected_path; // Used for validation in future
-    std::thread::spawn(move || {
-        for _ in 0..30 {
-            std::thread::sleep(std::time::Duration::from_millis(100));
-            if kill(nix_pid, None).is_err() {
-                return; // Process is dead
-            }
+    // Wait up to 3 seconds for process to die (blocking)
+    for _ in 0..30 {
+        std::thread::sleep(std::time::Duration::from_millis(100));
+        if kill(nix_pid, None).is_err() {
+            return Ok(()); // Process is dead
         }
-        // Process didn't die — escalate to SIGKILL
-        tracing::info!("PID {} didn't respond to SIGTERM, sending SIGKILL", pid);
-        let _ = kill(nix_pid, Signal::SIGKILL);
-    });
+    }
+
+    // Process didn't die — escalate to SIGKILL
+    tracing::info!("PID {} didn't respond to SIGTERM, sending SIGKILL", pid);
+    let _ = kill(nix_pid, Signal::SIGKILL);
+    // Wait a bit more for SIGKILL to take effect
+    for _ in 0..10 {
+        std::thread::sleep(std::time::Duration::from_millis(100));
+        if kill(nix_pid, None).is_err() {
+            return Ok(());
+        }
+    }
 
     Ok(())
 }
