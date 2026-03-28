@@ -1634,6 +1634,116 @@ fn parse_docker_ports(ports: &str) -> Vec<u16> {
         .collect()
 }
 
+// ── Persistent Notes ─────────────────────────────────────────────────────────
+
+#[derive(Deserialize)]
+pub struct SetNoteBody {
+    pub key: String,
+    pub value: String,
+}
+
+#[derive(Deserialize)]
+pub struct SearchNotesQuery {
+    pub q: String,
+}
+
+/// GET /projects/{id}/notes — get all notes for a project
+pub async fn get_project_notes(
+    State(state): State<AppState>,
+    Path(id): Path<i64>,
+) -> Result<Json<serde_json::Value>, StatusCode> {
+    state
+        .registry
+        .get_project(id)
+        .ok_or(StatusCode::NOT_FOUND)?;
+    let notes = state.registry.get_notes(id);
+    let items: Vec<serde_json::Value> = notes
+        .into_iter()
+        .map(|(key, value, updated_at)| {
+            serde_json::json!({ "key": key, "value": value, "updated_at": updated_at })
+        })
+        .collect();
+    Ok(Json(serde_json::json!({ "notes": items })))
+}
+
+/// POST /projects/{id}/notes — set a note for a project
+pub async fn set_project_note(
+    State(state): State<AppState>,
+    Path(id): Path<i64>,
+    Json(body): Json<SetNoteBody>,
+) -> Result<Json<serde_json::Value>, StatusCode> {
+    state
+        .registry
+        .get_project(id)
+        .ok_or(StatusCode::NOT_FOUND)?;
+    state.registry.set_note(id, &body.key, &body.value);
+    Ok(Json(serde_json::json!({ "status": "ok", "key": body.key })))
+}
+
+/// DELETE /projects/{id}/notes/{key} — delete a note
+pub async fn delete_project_note(
+    State(state): State<AppState>,
+    Path((id, key)): Path<(i64, String)>,
+) -> Result<Json<serde_json::Value>, StatusCode> {
+    state
+        .registry
+        .get_project(id)
+        .ok_or(StatusCode::NOT_FOUND)?;
+    let deleted = state.registry.delete_note(id, &key);
+    Ok(Json(serde_json::json!({ "deleted": deleted })))
+}
+
+/// GET /notes — get global notes (project_id = 0)
+pub async fn get_global_notes(State(state): State<AppState>) -> Json<serde_json::Value> {
+    let notes = state.registry.get_notes(0);
+    let items: Vec<serde_json::Value> = notes
+        .into_iter()
+        .map(|(key, value, updated_at)| {
+            serde_json::json!({ "key": key, "value": value, "updated_at": updated_at })
+        })
+        .collect();
+    Json(serde_json::json!({ "notes": items }))
+}
+
+/// POST /notes — set a global note
+pub async fn set_global_note(
+    State(state): State<AppState>,
+    Json(body): Json<SetNoteBody>,
+) -> Json<serde_json::Value> {
+    state.registry.set_note(0, &body.key, &body.value);
+    Json(serde_json::json!({ "status": "ok", "key": body.key }))
+}
+
+/// GET /notes/search?q=query — search across all notes
+pub async fn search_notes(
+    State(state): State<AppState>,
+    Query(q): Query<SearchNotesQuery>,
+) -> Json<serde_json::Value> {
+    let results = state.registry.search_notes(&q.q);
+    let items: Vec<serde_json::Value> = results
+        .into_iter()
+        .map(|(project_id, key, value, updated_at)| {
+            let project_name = if project_id == 0 {
+                "global".to_string()
+            } else {
+                state
+                    .registry
+                    .get_project(project_id)
+                    .map(|p| p.name)
+                    .unwrap_or_else(|| format!("project_{}", project_id))
+            };
+            serde_json::json!({
+                "project": project_name,
+                "project_id": project_id,
+                "key": key,
+                "value": value,
+                "updated_at": updated_at,
+            })
+        })
+        .collect();
+    Json(serde_json::json!({ "results": items }))
+}
+
 // ── Dependency Freshness ─────────────────────────────────────────────────────
 
 /// GET /projects/{id}/deps — check if dependencies are up to date

@@ -126,6 +126,36 @@ pub struct HealthCheckParams {
 }
 
 #[derive(Serialize, Deserialize, JsonSchema)]
+pub struct SetNoteParams {
+    /// Project name (omit or use "global" for global notes)
+    pub project: Option<String>,
+    /// Note key (e.g., "setup", "gotcha", "last-working-config")
+    pub key: String,
+    /// Note content
+    pub value: String,
+}
+
+#[derive(Serialize, Deserialize, JsonSchema)]
+pub struct GetNotesParams {
+    /// Project name (omit or use "global" for global notes)
+    pub project: Option<String>,
+}
+
+#[derive(Serialize, Deserialize, JsonSchema)]
+pub struct DeleteNoteParams {
+    /// Project name (omit or use "global" for global notes)
+    pub project: Option<String>,
+    /// Note key to delete
+    pub key: String,
+}
+
+#[derive(Serialize, Deserialize, JsonSchema)]
+pub struct SearchNotesParams {
+    /// Search query (searches across all note keys and values)
+    pub query: String,
+}
+
+#[derive(Serialize, Deserialize, JsonSchema)]
 pub struct DockerStatusParams {}
 
 #[derive(Serialize, Deserialize, JsonSchema)]
@@ -652,6 +682,118 @@ impl McpServer {
             url = format!("{}?path={}", url, path);
         }
         match reqwest::get(&url).await {
+            Ok(resp) => resp.text().await.unwrap_or_default(),
+            Err(_) => "havn server not running.".to_string(),
+        }
+    }
+
+    // ── Persistent Notes (cross-session memory) ────────────────────────────
+
+    /// Save a note that persists across conversations.
+    /// Use this to remember things about a project: setup steps, gotchas,
+    /// working configurations, or anything the next agent session should know.
+    /// Notes survive daemon restarts and are stored in SQLite.
+    #[tool(
+        name = "set_note",
+        description = "Save a persistent note about a project (or global). Survives across agent sessions. Use to remember setup steps, gotchas, working configs, or context for the next conversation."
+    )]
+    async fn set_note(&self, params: Parameters<SetNoteParams>) -> String {
+        let project = params.0.project.as_deref().unwrap_or("global");
+        if project == "global" {
+            let client = reqwest::Client::new();
+            let body = serde_json::json!({ "key": params.0.key, "value": params.0.value });
+            match client
+                .post(format!("{}/notes", self.api_url))
+                .json(&body)
+                .send()
+                .await
+            {
+                Ok(resp) => resp.text().await.unwrap_or_default(),
+                Err(_) => "havn server not running.".to_string(),
+            }
+        } else {
+            let id = match self.resolve_project_id(project).await {
+                Ok(id) => id,
+                Err(e) => return e,
+            };
+            let client = reqwest::Client::new();
+            let body = serde_json::json!({ "key": params.0.key, "value": params.0.value });
+            match client
+                .post(format!("{}/projects/{}/notes", self.api_url, id))
+                .json(&body)
+                .send()
+                .await
+            {
+                Ok(resp) => resp.text().await.unwrap_or_default(),
+                Err(_) => "havn server not running.".to_string(),
+            }
+        }
+    }
+
+    /// Get all notes for a project or global notes.
+    /// Call this at the start of a session to load context from previous conversations.
+    #[tool(
+        name = "get_notes",
+        description = "Get all persistent notes for a project (or global). Call at the start of a session to load context from previous conversations."
+    )]
+    async fn get_notes(&self, params: Parameters<GetNotesParams>) -> String {
+        let project = params.0.project.as_deref().unwrap_or("global");
+        if project == "global" {
+            match reqwest::get(&format!("{}/notes", self.api_url)).await {
+                Ok(resp) => resp.text().await.unwrap_or_default(),
+                Err(_) => "havn server not running.".to_string(),
+            }
+        } else {
+            let id = match self.resolve_project_id(project).await {
+                Ok(id) => id,
+                Err(e) => return e,
+            };
+            match reqwest::get(&format!("{}/projects/{}/notes", self.api_url, id)).await {
+                Ok(resp) => resp.text().await.unwrap_or_default(),
+                Err(_) => "havn server not running.".to_string(),
+            }
+        }
+    }
+
+    /// Delete a note.
+    #[tool(name = "delete_note", description = "Delete a persistent note by key.")]
+    async fn delete_note(&self, params: Parameters<DeleteNoteParams>) -> String {
+        let project = params.0.project.as_deref().unwrap_or("global");
+        let id = if project == "global" {
+            0
+        } else {
+            match self.resolve_project_id(project).await {
+                Ok(id) => id,
+                Err(e) => return e,
+            }
+        };
+        let client = reqwest::Client::new();
+        match client
+            .delete(format!(
+                "{}/projects/{}/notes/{}",
+                self.api_url, id, params.0.key
+            ))
+            .send()
+            .await
+        {
+            Ok(resp) => resp.text().await.unwrap_or_default(),
+            Err(_) => "havn server not running.".to_string(),
+        }
+    }
+
+    /// Search across all notes (global and per-project).
+    /// Use when you remember something was noted but don't know which project.
+    #[tool(
+        name = "search_notes",
+        description = "Search across all notes (global + per-project). Finds notes by key or value content."
+    )]
+    async fn search_notes(&self, params: Parameters<SearchNotesParams>) -> String {
+        match reqwest::get(&format!(
+            "{}/notes/search?q={}",
+            self.api_url, params.0.query
+        ))
+        .await
+        {
             Ok(resp) => resp.text().await.unwrap_or_default(),
             Err(_) => "havn server not running.".to_string(),
         }

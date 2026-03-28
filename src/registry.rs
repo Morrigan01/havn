@@ -143,6 +143,17 @@ impl Registry {
                 UNIQUE(profile_id, dependent_id, requires_id)
             );
 
+            -- Persistent notes: agent/user context that survives across sessions
+            CREATE TABLE IF NOT EXISTS notes (
+                id         INTEGER PRIMARY KEY,
+                project_id INTEGER NOT NULL DEFAULT 0,
+                key        TEXT NOT NULL,
+                value      TEXT NOT NULL,
+                created_at TEXT NOT NULL,
+                updated_at TEXT NOT NULL,
+                UNIQUE(project_id, key)
+            );
+
             -- Per-project readiness rules within a profile
             CREATE TABLE IF NOT EXISTS profile_project_config (
                 id           INTEGER PRIMARY KEY,
@@ -565,6 +576,75 @@ impl Registry {
             rusqlite::params![profile_id, project_id],
         )
         .ok();
+    }
+
+    // ── Notes (persistent agent/user context) ──────────────────────────────
+
+    pub fn set_note(&self, project_id: i64, key: &str, value: &str) {
+        let conn = self.conn.lock().unwrap();
+        let now = chrono::Utc::now().to_rfc3339();
+        conn.execute(
+            "INSERT INTO notes (project_id, key, value, created_at, updated_at) \
+             VALUES (?1, ?2, ?3, ?4, ?4) \
+             ON CONFLICT(project_id, key) DO UPDATE SET value = ?3, updated_at = ?4",
+            rusqlite::params![project_id, key, value, now],
+        )
+        .ok();
+    }
+
+    #[allow(dead_code)]
+    pub fn get_note(&self, project_id: i64, key: &str) -> Option<String> {
+        let conn = self.conn.lock().unwrap();
+        conn.query_row(
+            "SELECT value FROM notes WHERE project_id = ?1 AND key = ?2",
+            rusqlite::params![project_id, key],
+            |row| row.get(0),
+        )
+        .ok()
+    }
+
+    pub fn get_notes(&self, project_id: i64) -> Vec<(String, String, String)> {
+        let conn = self.conn.lock().unwrap();
+        let mut stmt = match conn.prepare(
+            "SELECT key, value, updated_at FROM notes WHERE project_id = ?1 ORDER BY updated_at DESC",
+        ) {
+            Ok(s) => s,
+            Err(_) => return Vec::new(),
+        };
+        stmt.query_map([project_id], |row| {
+            Ok((row.get(0)?, row.get(1)?, row.get(2)?))
+        })
+        .unwrap()
+        .filter_map(|r| r.ok())
+        .collect()
+    }
+
+    pub fn delete_note(&self, project_id: i64, key: &str) -> bool {
+        let conn = self.conn.lock().unwrap();
+        conn.execute(
+            "DELETE FROM notes WHERE project_id = ?1 AND key = ?2",
+            rusqlite::params![project_id, key],
+        )
+        .map(|n| n > 0)
+        .unwrap_or(false)
+    }
+
+    pub fn search_notes(&self, query: &str) -> Vec<(i64, String, String, String)> {
+        let conn = self.conn.lock().unwrap();
+        let pattern = format!("%{}%", query);
+        let mut stmt = match conn.prepare(
+            "SELECT project_id, key, value, updated_at FROM notes \
+             WHERE key LIKE ?1 OR value LIKE ?1 ORDER BY updated_at DESC LIMIT 50",
+        ) {
+            Ok(s) => s,
+            Err(_) => return Vec::new(),
+        };
+        stmt.query_map([&pattern], |row| {
+            Ok((row.get(0)?, row.get(1)?, row.get(2)?, row.get(3)?))
+        })
+        .unwrap()
+        .filter_map(|r| r.ok())
+        .collect()
     }
 
     // ── Dependency Edges ─────────────────────────────────────────────────────
