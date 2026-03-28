@@ -16,7 +16,39 @@
 
 ---
 
-## What it does
+## Why havn exists
+
+Modern developers run multiple dev servers at once: a frontend on `:3000`, an API on `:8080`, a database on `:5432`, a worker on `:9001`. You lose track of what's running where. Your AI coding agent (Claude Code, Cursor, Windsurf) can write code for you, but it has no idea what's happening on your machine. It can't see your running services, can't tell you which one crashed, and can't start your dev environment for you.
+
+**havn is the missing link between your AI agent and your local dev environment.**
+
+It's a single Rust binary that:
+- **Scans** your machine every 5 seconds to discover running dev servers
+- **Maps** each process to its project directory and detects the framework (Next.js, Express, Vite, Django, Rails, etc.)
+- **Exposes** everything through an [MCP server](https://modelcontextprotocol.io/) so your AI agent can see, control, and orchestrate your local services
+- **Provides** a web dashboard at `localhost:9390` and a CLI for when you want to look yourself
+
+### Who it's for
+
+- **Developers running 3+ concurrent services** who use AI coding agents
+- **Anyone tired of pasting `lsof` output** into AI chat to explain what's running
+- **Teams building microservices locally** who want one-command stack startup
+
+### What you can do with it
+
+| Use case | How |
+|----------|-----|
+| See what's running | `havn status` or ask your agent |
+| Start your full dev stack | Agent calls `start_stack("payments")`, services start in dependency order |
+| Debug a broken service | Agent calls `diagnose_stack`, finds root cause across services |
+| Restart a crashed server | Agent calls `restart_and_verify`, confirms it's healthy |
+| Check for env issues | Agent calls `validate_env` before starting, catches port conflicts and missing vars |
+| Manage secrets | `havn secret set DB_PASSWORD ...` (AES-256-GCM encrypted) |
+| Run as a background daemon | `havn install-service` (launchd on macOS, systemd on Linux) |
+
+---
+
+## See it in action
 
 Your AI agent says one sentence. havn orchestrates the rest.
 
@@ -46,14 +78,6 @@ Agent: > havn.diagnose_stack({ name: "payments" })
 
        Root cause: api-server crashed. Suggestion: restart api-server.
 ```
-
----
-
-## The problem
-
-You're running 5+ dev servers. You can't remember which port is which. Your AI agent can't see any of it. You paste `lsof` output into chat. Again.
-
-**havn** continuously scans your local ports, maps them to project directories, detects the framework, and exposes everything through an **MCP server** that any AI agent can query and control.
 
 ---
 
