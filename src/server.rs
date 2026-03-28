@@ -69,6 +69,8 @@ pub async fn run(bind: String, port: u16) {
         .route("/profiles/{id}/projects/{project_id}", delete(api::remove_project_from_profile))
         .route("/profiles/{id}/start", post(api::start_profile))
         .route("/profiles/{id}/stop", post(api::stop_profile))
+        .route("/projects/{id}/run", post(api::run_project_command))
+        .route("/health/{port}", get(api::health_check_port))
         .route("/profiles/{id}/detail", get(api::get_stack_detail))
         .route("/profiles/{id}/start-stack", post(api::start_stack))
         .route("/profiles/{id}/stop-stack", post(api::stop_stack))

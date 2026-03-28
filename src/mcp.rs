@@ -99,6 +99,34 @@ pub struct GetEffectiveEnvParams {
 pub struct GetVersionParams {}
 
 #[derive(Serialize, Deserialize, JsonSchema)]
+pub struct GetLogsParams {
+    /// Project name
+    pub name: String,
+    /// Number of log lines to return (default: 50, max: 500)
+    pub lines: Option<usize>,
+    /// Filter by stream: "stdout", "stderr", or "all" (default: "all")
+    pub stream: Option<String>,
+}
+
+#[derive(Serialize, Deserialize, JsonSchema)]
+pub struct RunCommandParams {
+    /// Project name (command runs in the project's directory)
+    pub name: String,
+    /// Shell command to run (e.g. "npm install", "cargo build", "npx prisma migrate dev")
+    pub command: String,
+    /// Timeout in seconds (default: 30, max: 300)
+    pub timeout_secs: Option<u64>,
+}
+
+#[derive(Serialize, Deserialize, JsonSchema)]
+pub struct HealthCheckParams {
+    /// Port number to check
+    pub port: u16,
+    /// HTTP path to check (default: "/")
+    pub path: Option<String>,
+}
+
+#[derive(Serialize, Deserialize, JsonSchema)]
 pub struct ListStacksParams {}
 
 #[derive(Serialize, Deserialize, JsonSchema)]
@@ -479,6 +507,98 @@ impl McpServer {
                 )
             }
             _ => format!("havn v{} (latest)", current),
+        }
+    }
+
+    // ── Agent Helper Tools ─────────────────────────────────────────────────────
+
+    /// Get recent stdout and stderr logs for a project.
+    /// Use after restarting a service to verify your code fix worked,
+    /// or to see what a service is printing.
+    #[tool(
+        name = "get_logs",
+        description = "Get recent stdout/stderr logs for a project. Use after code changes and restart to verify the fix worked. Filter by stream (stdout, stderr, or all)."
+    )]
+    async fn get_logs(&self, params: Parameters<GetLogsParams>) -> String {
+        let id = match self.resolve_project_id(&params.0.name).await {
+            Ok(id) => id,
+            Err(e) => return e,
+        };
+        let lines = params.0.lines.unwrap_or(50).min(500);
+        let url = format!("{}/projects/{}/logs?lines={}", self.api_url, id, lines);
+        match reqwest::get(&url).await {
+            Ok(resp) => {
+                let body = resp.text().await.unwrap_or_default();
+                // Filter by stream if requested
+                let stream_filter = params.0.stream.as_deref().unwrap_or("all");
+                if stream_filter == "all" {
+                    return body;
+                }
+                // Parse and filter
+                if let Ok(logs) = serde_json::from_str::<Vec<serde_json::Value>>(&body) {
+                    let filtered: Vec<&serde_json::Value> = logs.iter()
+                        .filter(|l| l.get("stream").and_then(|s| s.as_str()) == Some(stream_filter))
+                        .collect();
+                    if filtered.is_empty() {
+                        return format!("No {} logs for '{}'.", stream_filter, params.0.name);
+                    }
+                    serde_json::to_string_pretty(&filtered).unwrap_or(body)
+                } else {
+                    body
+                }
+            }
+            Err(_) => "havn server not running.".to_string(),
+        }
+    }
+
+    /// Run a shell command in a project's directory.
+    /// Use for: npm install, cargo build, npx prisma migrate, pip install, etc.
+    /// The command runs with the project's root as the working directory.
+    #[tool(
+        name = "run_command",
+        description = "Run a shell command in a project's directory. Use for npm install, cargo build, migrations, linting, or any command that needs to run in the right directory. Returns stdout, stderr, and exit code."
+    )]
+    async fn run_command(&self, params: Parameters<RunCommandParams>) -> String {
+        let id = match self.resolve_project_id(&params.0.name).await {
+            Ok(id) => id,
+            Err(e) => return e,
+        };
+        let timeout = params.0.timeout_secs.unwrap_or(30);
+        let client = reqwest::Client::new();
+        let body = serde_json::json!({
+            "command": params.0.command,
+            "timeout_secs": timeout,
+        });
+        match client
+            .post(format!("{}/projects/{}/run", self.api_url, id))
+            .json(&body)
+            .timeout(std::time::Duration::from_secs(timeout + 5)) // HTTP timeout slightly longer
+            .send()
+            .await
+        {
+            Ok(resp) => resp.text().await.unwrap_or_default(),
+            Err(e) if e.is_timeout() => {
+                format!("Command timed out after {}s.", timeout)
+            }
+            Err(_) => "havn server not running.".to_string(),
+        }
+    }
+
+    /// Check if a service is responding on a given port.
+    /// Use after restarting a service to verify it's actually healthy,
+    /// or to check if a dependency (database, API) is reachable.
+    #[tool(
+        name = "health_check",
+        description = "Check if a service is responding on a port. Returns HTTP status, latency, and whether it's healthy. Use to verify a service is up after restart."
+    )]
+    async fn health_check(&self, params: Parameters<HealthCheckParams>) -> String {
+        let mut url = format!("{}/health/{}", self.api_url, params.0.port);
+        if let Some(ref path) = params.0.path {
+            url = format!("{}?path={}", url, path);
+        }
+        match reqwest::get(&url).await {
+            Ok(resp) => resp.text().await.unwrap_or_default(),
+            Err(_) => "havn server not running.".to_string(),
         }
     }
 

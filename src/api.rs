@@ -1267,6 +1267,142 @@ pub async fn stop_profile(
     Json(serde_json::json!({"stopped": stopped}))
 }
 
+// ── Agent Helper Endpoints ────────────────────────────────────────────────────
+
+#[derive(Deserialize)]
+pub struct RunCommandBody {
+    pub command: String,
+    pub timeout_secs: Option<u64>,
+}
+
+/// POST /projects/{id}/run — run a shell command in the project's directory
+pub async fn run_project_command(
+    State(state): State<AppState>,
+    Path(id): Path<i64>,
+    Json(body): Json<RunCommandBody>,
+) -> Result<Json<serde_json::Value>, StatusCode> {
+    let project = state.registry.get_project(id).ok_or(StatusCode::NOT_FOUND)?;
+
+    // Safety: block obviously dangerous commands
+    let cmd_lower = body.command.to_lowercase();
+    for pattern in &["rm -rf /", "rm -rf ~", "mkfs", "dd if=", "> /dev/sd", ":(){ :|:&", "chmod -R 777 /"] {
+        if cmd_lower.contains(pattern) {
+            return Ok(Json(serde_json::json!({
+                "status": "error",
+                "message": format!("Command blocked: contains dangerous pattern '{}'", pattern),
+            })));
+        }
+    }
+
+    let timeout = std::time::Duration::from_secs(body.timeout_secs.unwrap_or(30).min(300));
+
+    let result = tokio::time::timeout(
+        timeout,
+        tokio::process::Command::new("sh")
+            .arg("-c")
+            .arg(&body.command)
+            .current_dir(&project.path)
+            .stdout(std::process::Stdio::piped())
+            .stderr(std::process::Stdio::piped())
+            .output(),
+    ).await;
+
+    match result {
+        Ok(Ok(output)) => {
+            let stdout = String::from_utf8_lossy(&output.stdout);
+            let stderr = String::from_utf8_lossy(&output.stderr);
+            let exit_code = output.status.code().unwrap_or(-1);
+
+            // Truncate output to avoid huge responses
+            let max_len = 10_000;
+            let stdout_str = if stdout.len() > max_len {
+                format!("{}...\n(truncated, {} total bytes)", &stdout[..max_len], stdout.len())
+            } else {
+                stdout.to_string()
+            };
+            let stderr_str = if stderr.len() > max_len {
+                format!("{}...\n(truncated, {} total bytes)", &stderr[..max_len], stderr.len())
+            } else {
+                stderr.to_string()
+            };
+
+            Ok(Json(serde_json::json!({
+                "status": if exit_code == 0 { "ok" } else { "error" },
+                "exit_code": exit_code,
+                "stdout": stdout_str,
+                "stderr": stderr_str,
+                "project": project.name,
+                "cwd": project.path,
+            })))
+        }
+        Ok(Err(e)) => {
+            Ok(Json(serde_json::json!({
+                "status": "error",
+                "message": format!("Failed to execute: {}", e),
+            })))
+        }
+        Err(_) => {
+            Ok(Json(serde_json::json!({
+                "status": "timeout",
+                "message": format!("Command timed out after {}s", timeout.as_secs()),
+            })))
+        }
+    }
+}
+
+/// GET /health/{port} — check if a URL/port is responding
+pub async fn health_check_port(
+    Path(port): Path<u16>,
+    Query(q): Query<HealthCheckQuery>,
+) -> Json<serde_json::Value> {
+    let path = q.path.as_deref().unwrap_or("/");
+    let url = format!("http://127.0.0.1:{}{}", port, path);
+
+    let client = reqwest::Client::builder()
+        .timeout(std::time::Duration::from_secs(5))
+        .redirect(reqwest::redirect::Policy::none())
+        .build()
+        .unwrap();
+
+    let start = std::time::Instant::now();
+    match client.get(&url).send().await {
+        Ok(resp) => {
+            let latency_ms = start.elapsed().as_millis();
+            let status = resp.status().as_u16();
+            Json(serde_json::json!({
+                "status": "reachable",
+                "http_status": status,
+                "latency_ms": latency_ms,
+                "url": url,
+                "healthy": status >= 200 && status < 400,
+            }))
+        }
+        Err(e) => {
+            let latency_ms = start.elapsed().as_millis();
+            let reason = if e.is_timeout() {
+                "timeout"
+            } else if e.is_connect() {
+                "connection_refused"
+            } else {
+                "error"
+            };
+            Json(serde_json::json!({
+                "status": "unreachable",
+                "reason": reason,
+                "latency_ms": latency_ms,
+                "url": url,
+                "healthy": false,
+                "error": e.to_string(),
+            }))
+        }
+    }
+}
+
+#[derive(Deserialize)]
+pub struct HealthCheckQuery {
+    pub path: Option<String>,
+}
+
 // ── Stack Orchestration Endpoints ─────────────────────────────────────────────
 
 #[derive(Serialize)]
