@@ -43,7 +43,11 @@ let activeTab = 'projects'; // 'projects' | 'secrets' | 'profiles'
 
 // ─── Detail panel ──────────────────────────────────────────────────────────
 let selectedProjectId = null;
-let panelData = {};  // id → { git, health, resources, logs }
+let panelData = {};  // id → { git, health, resources, logs, deps, db }
+
+// ─── Docker (global, cached once) ────────────────────────────────────────────
+let dockerData = null;  // cached /docker response
+let dockerLoading = false;
 
 // ─── Profiles ──────────────────────────────────────────────────────────────
 let profiles = [];
@@ -122,7 +126,7 @@ function render() {
             Secrets${totalSecrets > 0 ? ` <span class="secrets-count">${totalSecrets}</span>` : ''}
           </button>
           <button class="rail-tab ${activeTab === 'profiles' ? 'active' : ''}"
-                  onclick="window._setTab('profiles')">Profiles${profiles.length > 0 ? ` <span class="secrets-count">${profiles.length}</span>` : ''}</button>
+                  onclick="window._setTab('profiles')">Stacks${profiles.length > 0 ? ` <span class="secrets-count">${profiles.length}</span>` : ''}</button>
         </nav>
         <div class="rail-bottom">
           <input class="rail-search" type="text" placeholder="Filter…" value="${filter}"
@@ -920,6 +924,9 @@ function renderDetailPanel(p) {
         ${renderGitSection(p.id, d.git)}
         ${renderHealthSection(p.id, d.health)}
         ${renderResourcesSection(p.id, d.resources)}
+        ${renderDockerSection()}
+        ${renderDepsSection(p.id, d.deps)}
+        ${renderDbSection(p.id, d.db)}
         <div class="panel-section">
           <div class="panel-section-title">Terminal</div>
           <button class="panel-action-btn" onclick="window._openTerminal(${p.id})">Open in Terminal</button>
@@ -1028,6 +1035,159 @@ function renderLogsSection(id, logs) {
   </div>`;
 }
 
+function renderDockerSection() {
+  if (!dockerData) {
+    return `<div class="panel-section">
+      <div class="panel-section-title">Docker</div>
+      <div class="panel-loading">${dockerLoading ? 'Loading…' : 'Not loaded'}</div>
+    </div>`;
+  }
+  if (dockerData.error) {
+    return `<div class="panel-section">
+      <div class="panel-section-title">Docker</div>
+      <div class="panel-muted">Docker not available</div>
+    </div>`;
+  }
+  const containers = Array.isArray(dockerData) ? dockerData : (dockerData.containers || []);
+  if (containers.length === 0) {
+    return `<div class="panel-section">
+      <div class="panel-section-title">Docker</div>
+      <div class="panel-muted">No containers running</div>
+    </div>`;
+  }
+  const rows = containers.map(c => {
+    const statusClass = (c.status || '').toLowerCase().includes('up') ? 'ok' : 'fail';
+    const ports = (c.ports || []).join(', ') || '—';
+    return `
+    <div class="panel-resource-row">
+      <span class="panel-health-dot ${statusClass}"></span>
+      <span class="panel-resource-pid" style="min-width:100px">${esc(c.name || c.Names || '—')}</span>
+      <span class="panel-resource-cpu" style="min-width:120px">${esc(c.image || c.Image || '—')}</span>
+      <span class="panel-resource-mem">${esc(ports)}</span>
+    </div>`;
+  }).join('');
+  return `<div class="panel-section">
+    <div class="panel-section-title">Docker</div>
+    ${rows}
+  </div>`;
+}
+
+function renderDepsSection(id, deps) {
+  const refreshBtn = `<button class="panel-refresh-btn" onclick="event.stopPropagation();window._fetchPanelData(${id},'deps')">↻</button>`;
+  if (!deps) {
+    return `<div class="panel-section">
+      <div class="panel-section-title">Dependencies ${refreshBtn}</div>
+      <div class="panel-loading">Loading…</div>
+    </div>`;
+  }
+  if (deps.error) {
+    return `<div class="panel-section">
+      <div class="panel-section-title">Dependencies ${refreshBtn}</div>
+      <div class="panel-muted">${esc(deps.error)}</div>
+    </div>`;
+  }
+  const items = Array.isArray(deps) ? deps : (deps.dependencies || [deps]);
+  if (items.length === 0) {
+    return `<div class="panel-section">
+      <div class="panel-section-title">Dependencies ${refreshBtn}</div>
+      <div class="panel-muted">No dependency info</div>
+    </div>`;
+  }
+  const rows = items.map(d => {
+    const status = d.status || 'unknown';
+    const statusClass = status === 'fresh' ? 'ok' : (status === 'stale' ? 'stale-deps' : 'fail');
+    const statusColor = status === 'fresh' ? 'var(--success)' : (status === 'stale' ? 'var(--warning)' : 'var(--danger)');
+    const fixBtn = (status === 'stale' || status === 'missing') && d.fix_command
+      ? `<button class="open-btn" style="font-size:10px;padding:2px 6px;margin-left:8px" onclick="window._runFixCommand(${id},'${esc(d.fix_command)}')">Fix</button>`
+      : '';
+    return `
+    <div class="panel-resource-row">
+      <span class="panel-health-dot" style="background:${statusColor}"></span>
+      <span class="panel-resource-pid">${esc(d.manager || d.name || '—')}</span>
+      <span class="panel-resource-cpu" style="color:${statusColor}">${esc(status)}</span>
+      ${d.fix_command ? `<span class="panel-resource-mem" style="font-size:10px;color:var(--text-muted)">${esc(d.fix_command)}</span>` : ''}
+      ${fixBtn}
+    </div>`;
+  }).join('');
+  return `<div class="panel-section">
+    <div class="panel-section-title">Dependencies ${refreshBtn}</div>
+    ${rows}
+  </div>`;
+}
+
+function renderDbSection(id, db) {
+  const refreshBtn = `<button class="panel-refresh-btn" onclick="event.stopPropagation();window._fetchPanelData(${id},'db')">↻</button>`;
+  if (!db) {
+    return `<div class="panel-section">
+      <div class="panel-section-title">Databases ${refreshBtn}</div>
+      <div class="panel-loading">Loading…</div>
+    </div>`;
+  }
+  if (db.error) {
+    return `<div class="panel-section">
+      <div class="panel-section-title">Databases ${refreshBtn}</div>
+      <div class="panel-muted">${esc(db.error)}</div>
+    </div>`;
+  }
+  const items = Array.isArray(db) ? db : (db.databases || []);
+  if (items.length === 0) {
+    return `<div class="panel-section">
+      <div class="panel-section-title">Databases ${refreshBtn}</div>
+      <div class="panel-muted">No databases detected</div>
+    </div>`;
+  }
+  const rows = items.map(d => {
+    const connected = (d.status || '').toLowerCase() === 'connected';
+    return `
+    <div class="panel-resource-row">
+      <span class="panel-health-dot ${connected ? 'ok' : 'fail'}"></span>
+      <span class="panel-resource-pid">${esc(d.type || '—')}</span>
+      <span class="panel-resource-cpu">${esc((d.host || 'localhost') + ':' + (d.port || '—'))}</span>
+      <span class="panel-resource-mem" style="color:${connected ? 'var(--success)' : 'var(--danger)'}">${connected ? 'connected' : 'unreachable'}</span>
+    </div>`;
+  }).join('');
+  return `<div class="panel-section">
+    <div class="panel-section-title">Databases ${refreshBtn}</div>
+    ${rows}
+  </div>`;
+}
+
+window._runFixCommand = async (id, command) => {
+  try {
+    const resp = await fetch(`/projects/${id}/run`, {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({ command }),
+    });
+    if (resp.ok) {
+      showToast(`Running: ${command}`, 'success');
+      // Refresh deps after a delay
+      setTimeout(() => window._fetchPanelData(id, 'deps'), 3000);
+    } else {
+      showToast('Fix command failed', 'error');
+    }
+  } catch (e) {
+    showToast(`Fix failed: ${e.message}`, 'error');
+  }
+};
+
+async function fetchDockerOnce() {
+  if (dockerData || dockerLoading) return;
+  dockerLoading = true;
+  try {
+    const resp = await fetch('/docker');
+    if (resp.ok) {
+      dockerData = await resp.json();
+    } else {
+      dockerData = { error: `HTTP ${resp.status}` };
+    }
+  } catch (e) {
+    dockerData = { error: e.message };
+  }
+  dockerLoading = false;
+  if (selectedProjectId) render();
+}
+
 window._selectProject = (id) => {
   if (selectedProjectId === id) {
     selectedProjectId = null;
@@ -1040,7 +1200,10 @@ window._selectProject = (id) => {
   window._fetchPanelData(id, 'git');
   window._fetchPanelData(id, 'health');
   window._fetchPanelData(id, 'resources');
+  window._fetchPanelData(id, 'deps');
+  window._fetchPanelData(id, 'db');
   window._refreshLogs(id);
+  fetchDockerOnce();
 };
 
 window._closePanel = () => {
@@ -1049,8 +1212,13 @@ window._closePanel = () => {
 };
 
 window._fetchPanelData = async (id, section) => {
+  const urlMap = {
+    deps: `/projects/${id}/deps`,
+    db: `/projects/${id}/db-status`,
+  };
+  const url = urlMap[section] || `/projects/${id}/${section}`;
   try {
-    const resp = await fetch(`/projects/${id}/${section}`);
+    const resp = await fetch(url);
     if (!panelData[id]) panelData[id] = {};
     if (!resp.ok) {
       panelData[id][section] = { error: `HTTP ${resp.status}` };
@@ -1111,15 +1279,15 @@ async function loadProfiles() {
 function profilesBoard() {
   let html = `
     <div class="profiles-header">
-      <span class="section-label" style="padding:0">Profiles</span>
+      <span class="section-label" style="padding:0">Stacks</span>
       <form class="add-profile-form" onsubmit="window._createProfile(event)">
-        <input name="name" placeholder="Profile name…" required autocomplete="off">
+        <input name="name" placeholder="Stack name…" required autocomplete="off">
         <button type="submit" class="set-btn">Create</button>
       </form>
     </div>`;
 
   if (profiles.length === 0) {
-    html += `<div class="panel-muted" style="padding:24px 16px">No profiles yet. Create one to group projects together.</div>`;
+    html += `<div class="panel-muted" style="padding:24px 16px">No stacks yet. Create one to group projects together.</div>`;
     return html;
   }
 
@@ -1141,10 +1309,12 @@ function renderProfileCard(profile) {
         <div class="profile-header-actions">
           ${profileProjects.length > 0
             ? (allRunning
-                ? `<button class="restart-btn" onclick="window._stopProfile(${profile.id})">Stop All</button>`
-                : `<button class="open-btn" onclick="window._startProfile(${profile.id})">Start All</button>`)
+                ? `<button class="restart-btn" onclick="window._stopStack(${profile.id})">Stop All</button>`
+                : `<button class="open-btn" onclick="window._startStack(${profile.id})">Start All</button>`)
             : ''
           }
+          <button class="open-btn" style="font-size:11px;padding:3px 8px" onclick="window._diagnoseStack(${profile.id})">Diagnose</button>
+          <button class="open-btn" style="font-size:11px;padding:3px 8px" onclick="window._validateStack(${profile.id})">Validate</button>
           <button class="profile-delete-btn" onclick="window._deleteProfile(${profile.id})">Delete</button>
         </div>
       </div>
@@ -1263,6 +1433,64 @@ window._stopProfile = async (id) => {
     else showToast('Profile stopped', 'success');
   } catch (e) {
     showToast(`Failed: ${e.message}`, 'error');
+  }
+};
+
+window._startStack = async (id) => {
+  try {
+    const resp = await fetch(`/profiles/${id}/start-stack`, { method: 'POST' });
+    if (!resp.ok) showToast('Failed to start stack', 'error');
+    else showToast('Stack started', 'success');
+  } catch (e) {
+    showToast(`Failed: ${e.message}`, 'error');
+  }
+};
+
+window._stopStack = async (id) => {
+  try {
+    const resp = await fetch(`/profiles/${id}/stop-stack`, { method: 'POST' });
+    if (!resp.ok) showToast('Failed to stop stack', 'error');
+    else showToast('Stack stopped', 'success');
+  } catch (e) {
+    showToast(`Failed: ${e.message}`, 'error');
+  }
+};
+
+window._diagnoseStack = async (id) => {
+  try {
+    const resp = await fetch(`/profiles/${id}/diagnose`);
+    if (!resp.ok) {
+      showToast('Diagnose failed', 'error');
+      return;
+    }
+    const data = await resp.json();
+    const lines = Array.isArray(data) ? data : (data.issues || [data.message || JSON.stringify(data)]);
+    if (lines.length === 0) {
+      showToast('No issues found', 'success');
+    } else {
+      showToast(lines.join(' | '), 'warning');
+    }
+  } catch (e) {
+    showToast(`Diagnose failed: ${e.message}`, 'error');
+  }
+};
+
+window._validateStack = async (id) => {
+  try {
+    const resp = await fetch(`/profiles/${id}/validate-env`);
+    if (!resp.ok) {
+      showToast('Validation failed', 'error');
+      return;
+    }
+    const data = await resp.json();
+    const issues = Array.isArray(data) ? data : (data.issues || [data.message || JSON.stringify(data)]);
+    if (issues.length === 0) {
+      showToast('Environment valid', 'success');
+    } else {
+      showToast(issues.join(' | '), 'warning');
+    }
+  } catch (e) {
+    showToast(`Validation failed: ${e.message}`, 'error');
   }
 };
 
