@@ -1,6 +1,6 @@
 [package]
 name = "havn"
-version = "0.1.0"
+version = "0.2.1"
 edition = "2021"
 description = "Map local ports to project directories — CLI, dashboard, and MCP server"
 license = "BSL-1.1"

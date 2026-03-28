@@ -65,6 +65,8 @@ pub enum Command {
         #[command(subcommand)]
         action: SecretAction,
     },
+    /// Check for updates and self-update to the latest release
+    Update,
 }
 
 #[derive(Subcommand)]
@@ -453,6 +455,175 @@ pub async fn secret(args: &Cli, action: &SecretAction) {
                 Ok(r) => eprintln!("Failed: {}", r.text().await.unwrap_or_default()),
                 Err(e) => eprintln!("Error: {}", e),
             }
+        }
+    }
+}
+
+const GITHUB_REPO: &str = "Morrigan01/havn";
+
+/// Check GitHub for the latest release. Returns (latest_version, download_url) if newer.
+async fn check_latest_release() -> Option<(String, String)> {
+    let url = format!("https://api.github.com/repos/{}/releases/latest", GITHUB_REPO);
+    let client = reqwest::Client::builder()
+        .user_agent("havn-update-checker")
+        .timeout(std::time::Duration::from_secs(5))
+        .build()
+        .ok()?;
+
+    let resp = client.get(&url).send().await.ok()?;
+    if !resp.status().is_success() {
+        return None;
+    }
+    let data: serde_json::Value = resp.json().await.ok()?;
+    let latest_tag = data.get("tag_name")?.as_str()?;
+    let latest_version = latest_tag.strip_prefix('v').unwrap_or(latest_tag);
+
+    let current = env!("CARGO_PKG_VERSION");
+    if latest_version != current && version_is_newer(latest_version, current) {
+        // Find the right asset for this platform
+        let target = current_target();
+        let download_url = data.get("assets")
+            .and_then(|a| a.as_array())
+            .and_then(|assets| {
+                assets.iter().find_map(|asset| {
+                    let name = asset.get("name")?.as_str()?;
+                    if name.contains(&target) {
+                        asset.get("browser_download_url")?.as_str().map(|s| s.to_string())
+                    } else {
+                        None
+                    }
+                })
+            })
+            .unwrap_or_else(|| {
+                format!("https://github.com/{}/releases/tag/{}", GITHUB_REPO, latest_tag)
+            });
+
+        Some((latest_version.to_string(), download_url))
+    } else {
+        None
+    }
+}
+
+fn version_is_newer(latest: &str, current: &str) -> bool {
+    let parse = |v: &str| -> Vec<u32> {
+        v.split('.').filter_map(|s| s.parse().ok()).collect()
+    };
+    let l = parse(latest);
+    let c = parse(current);
+    l > c
+}
+
+fn current_target() -> String {
+    let arch = if cfg!(target_arch = "aarch64") { "aarch64" } else { "x86_64" };
+    let os = if cfg!(target_os = "macos") { "apple-darwin" } else { "unknown-linux-gnu" };
+    format!("{}-{}", arch, os)
+}
+
+/// Print a one-line update notice on startup (non-blocking).
+pub async fn check_for_update_notice() {
+    // Run in background so it doesn't slow startup
+    tokio::spawn(async {
+        if let Some((version, _url)) = check_latest_release().await {
+            eprintln!(
+                "\n  Update available: v{} -> v{}. Run `havn update` to upgrade.\n",
+                env!("CARGO_PKG_VERSION"),
+                version
+            );
+        }
+    });
+}
+
+/// Self-update: download the latest release binary and replace the current one.
+pub async fn update() {
+    println!("Checking for updates...");
+
+    match check_latest_release().await {
+        None => {
+            println!("You're on the latest version (v{}).", env!("CARGO_PKG_VERSION"));
+            return;
+        }
+        Some((version, url)) => {
+            println!("New version available: v{} (current: v{})", version, env!("CARGO_PKG_VERSION"));
+
+            if url.starts_with("https://github.com") && url.contains("/releases/tag/") {
+                // No binary asset for this platform, point to releases page
+                println!("No pre-built binary found for your platform ({}).", current_target());
+                println!("Download manually: {}", url);
+                println!("Or update from source: cargo install --path . --force");
+                return;
+            }
+
+            println!("Downloading from: {}", url);
+
+            let client = reqwest::Client::builder()
+                .user_agent("havn-updater")
+                .timeout(std::time::Duration::from_secs(120))
+                .build()
+                .unwrap();
+
+            let resp = match client.get(&url).send().await {
+                Ok(r) => r,
+                Err(e) => {
+                    eprintln!("Download failed: {}", e);
+                    return;
+                }
+            };
+
+            if !resp.status().is_success() {
+                eprintln!("Download failed: HTTP {}", resp.status());
+                return;
+            }
+
+            let bytes = match resp.bytes().await {
+                Ok(b) => b,
+                Err(e) => {
+                    eprintln!("Download failed: {}", e);
+                    return;
+                }
+            };
+
+            // Find current binary path
+            let current_exe = match std::env::current_exe() {
+                Ok(p) => p,
+                Err(e) => {
+                    eprintln!("Cannot determine binary path: {}", e);
+                    return;
+                }
+            };
+
+            // Write to a temp file next to the binary, then atomically rename
+            let tmp_path = current_exe.with_extension("tmp");
+            if let Err(e) = std::fs::write(&tmp_path, &bytes) {
+                eprintln!("Failed to write update: {}", e);
+                return;
+            }
+
+            // Make executable
+            #[cfg(unix)]
+            {
+                use std::os::unix::fs::PermissionsExt;
+                std::fs::set_permissions(&tmp_path, std::fs::Permissions::from_mode(0o755)).ok();
+            }
+
+            // Replace the old binary
+            let backup_path = current_exe.with_extension("old");
+            if let Err(e) = std::fs::rename(&current_exe, &backup_path) {
+                eprintln!("Failed to backup current binary: {}", e);
+                std::fs::remove_file(&tmp_path).ok();
+                return;
+            }
+
+            if let Err(e) = std::fs::rename(&tmp_path, &current_exe) {
+                eprintln!("Failed to install update: {}", e);
+                // Try to restore backup
+                std::fs::rename(&backup_path, &current_exe).ok();
+                return;
+            }
+
+            // Clean up backup
+            std::fs::remove_file(&backup_path).ok();
+
+            println!("Updated to v{}. Restart havn to use the new version.", version);
         }
     }
 }

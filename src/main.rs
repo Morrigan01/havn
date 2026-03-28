@@ -34,7 +34,9 @@ async fn main() {
             cli::set_start_cmd(&args, project, cmd).await
         }
         Some(cli::Command::Secret { action }) => cli::secret(&args, action).await,
+        Some(cli::Command::Update) => cli::update().await,
         None => {
+            cli::check_for_update_notice().await;
             let bind = args.bind.clone();
             let port = args.port;
             server::run(bind, port).await;

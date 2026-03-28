@@ -96,6 +96,9 @@ pub struct GetEffectiveEnvParams {
 }
 
 #[derive(Serialize, Deserialize, JsonSchema)]
+pub struct GetVersionParams {}
+
+#[derive(Serialize, Deserialize, JsonSchema)]
 pub struct ListStacksParams {}
 
 #[derive(Serialize, Deserialize, JsonSchema)]
@@ -443,6 +446,39 @@ impl McpServer {
                 Err(e) => format!("Error: {}", e),
             },
             Err(_) => "havn server not running.".to_string(),
+        }
+    }
+
+    /// Get the current havn version and check if an update is available.
+    #[tool(
+        name = "get_version",
+        description = "Get the current havn version and check if an update is available. Use at the start of a session to verify havn is current."
+    )]
+    async fn get_version(&self, _params: Parameters<GetVersionParams>) -> String {
+        let current = env!("CARGO_PKG_VERSION");
+
+        let url = "https://api.github.com/repos/Morrigan01/havn/releases/latest";
+        let latest = reqwest::Client::builder()
+            .user_agent("havn-mcp")
+            .timeout(std::time::Duration::from_secs(3))
+            .build()
+            .ok()
+            .and_then(|c| futures::executor::block_on(async {
+                let resp = c.get(url).send().await.ok()?;
+                let data: serde_json::Value = resp.json().await.ok()?;
+                data.get("tag_name")
+                    .and_then(|t| t.as_str())
+                    .map(|t| t.strip_prefix('v').unwrap_or(t).to_string())
+            }));
+
+        match latest {
+            Some(ref ver) if ver != current => {
+                format!(
+                    "havn v{} (update available: v{}). Tell the user to run `havn update` to upgrade.",
+                    current, ver
+                )
+            }
+            _ => format!("havn v{} (latest)", current),
         }
     }
 
