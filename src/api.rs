@@ -1403,6 +1403,449 @@ pub struct HealthCheckQuery {
     pub path: Option<String>,
 }
 
+// ── Docker Container Status ──────────────────────────────────────────────────
+
+/// GET /docker — list running Docker containers with port mappings
+pub async fn docker_status() -> Json<serde_json::Value> {
+    // Check if docker CLI is available
+    let docker_check = tokio::process::Command::new("docker")
+        .args(["info", "--format", "{{.ServerVersion}}"])
+        .stdout(std::process::Stdio::piped())
+        .stderr(std::process::Stdio::piped())
+        .output()
+        .await;
+
+    if docker_check.is_err() || !docker_check.as_ref().unwrap().status.success() {
+        return Json(serde_json::json!({
+            "status": "unavailable",
+            "message": "Docker is not running or not installed.",
+            "containers": [],
+        }));
+    }
+
+    // Get running containers with details
+    let output = tokio::process::Command::new("docker")
+        .args([
+            "ps", "--format",
+            "{{.ID}}\t{{.Names}}\t{{.Image}}\t{{.Status}}\t{{.Ports}}\t{{.State}}",
+        ])
+        .stdout(std::process::Stdio::piped())
+        .stderr(std::process::Stdio::piped())
+        .output()
+        .await;
+
+    let containers: Vec<serde_json::Value> = match output {
+        Ok(out) => {
+            String::from_utf8_lossy(&out.stdout)
+                .lines()
+                .filter(|l| !l.trim().is_empty())
+                .map(|line| {
+                    let parts: Vec<&str> = line.split('\t').collect();
+                    let ports = parts.get(4).unwrap_or(&"");
+                    let port_list: Vec<u16> = parse_docker_ports(ports);
+                    serde_json::json!({
+                        "id": parts.first().unwrap_or(&""),
+                        "name": parts.get(1).unwrap_or(&""),
+                        "image": parts.get(2).unwrap_or(&""),
+                        "status": parts.get(3).unwrap_or(&""),
+                        "ports_raw": ports,
+                        "host_ports": port_list,
+                        "state": parts.get(5).unwrap_or(&""),
+                    })
+                })
+                .collect()
+        }
+        Err(_) => Vec::new(),
+    };
+
+    let count = containers.len();
+    Json(serde_json::json!({
+        "status": "ok",
+        "count": count,
+        "containers": containers,
+    }))
+}
+
+/// Parse Docker port strings like "0.0.0.0:5432->5432/tcp, 0.0.0.0:6379->6379/tcp"
+fn parse_docker_ports(ports: &str) -> Vec<u16> {
+    ports
+        .split(',')
+        .filter_map(|p| {
+            // Match "0.0.0.0:5432->5432/tcp" or ":::5432->5432/tcp"
+            let arrow = p.find("->")?;
+            let host_part = &p[..arrow];
+            let colon = host_part.rfind(':')?;
+            host_part[colon + 1..].trim().parse::<u16>().ok()
+        })
+        .collect()
+}
+
+// ── Dependency Freshness ─────────────────────────────────────────────────────
+
+/// GET /projects/{id}/deps — check if dependencies are up to date
+pub async fn check_deps(
+    State(state): State<AppState>,
+    Path(id): Path<i64>,
+) -> Result<Json<serde_json::Value>, StatusCode> {
+    let project = state.registry.get_project(id).ok_or(StatusCode::NOT_FOUND)?;
+    let path = std::path::Path::new(&project.path);
+
+    let mut checks = Vec::new();
+
+    // Node.js: compare package.json mtime vs node_modules mtime
+    let pkg_json = path.join("package.json");
+    let node_modules = path.join("node_modules");
+    if pkg_json.exists() {
+        let lockfile = if path.join("package-lock.json").exists() {
+            path.join("package-lock.json")
+        } else if path.join("yarn.lock").exists() {
+            path.join("yarn.lock")
+        } else if path.join("pnpm-lock.yaml").exists() {
+            path.join("pnpm-lock.yaml")
+        } else if path.join("bun.lockb").exists() {
+            path.join("bun.lockb")
+        } else {
+            pkg_json.clone()
+        };
+
+        if !node_modules.exists() {
+            checks.push(serde_json::json!({
+                "type": "node",
+                "status": "missing",
+                "message": "node_modules not found. Run: npm install",
+                "fix_command": "npm install",
+            }));
+        } else {
+            let lock_mtime = std::fs::metadata(&lockfile).and_then(|m| m.modified()).ok();
+            let nm_mtime = std::fs::metadata(&node_modules).and_then(|m| m.modified()).ok();
+            if let (Some(lock_t), Some(nm_t)) = (lock_mtime, nm_mtime) {
+                if lock_t > nm_t {
+                    checks.push(serde_json::json!({
+                        "type": "node",
+                        "status": "stale",
+                        "message": "Lock file is newer than node_modules. Run: npm install",
+                        "fix_command": "npm install",
+                    }));
+                } else {
+                    checks.push(serde_json::json!({
+                        "type": "node",
+                        "status": "fresh",
+                        "message": "node_modules is up to date",
+                    }));
+                }
+            }
+        }
+    }
+
+    // Rust: compare Cargo.lock mtime vs target mtime
+    let cargo_lock = path.join("Cargo.lock");
+    let target_dir = path.join("target");
+    if cargo_lock.exists() {
+        if !target_dir.exists() {
+            checks.push(serde_json::json!({
+                "type": "rust",
+                "status": "missing",
+                "message": "target/ not found. Run: cargo build",
+                "fix_command": "cargo build",
+            }));
+        } else {
+            let lock_mtime = std::fs::metadata(&cargo_lock).and_then(|m| m.modified()).ok();
+            let target_mtime = std::fs::metadata(&target_dir).and_then(|m| m.modified()).ok();
+            if let (Some(lock_t), Some(target_t)) = (lock_mtime, target_mtime) {
+                if lock_t > target_t {
+                    checks.push(serde_json::json!({
+                        "type": "rust",
+                        "status": "stale",
+                        "message": "Cargo.lock is newer than target/. Run: cargo build",
+                        "fix_command": "cargo build",
+                    }));
+                } else {
+                    checks.push(serde_json::json!({
+                        "type": "rust",
+                        "status": "fresh",
+                        "message": "Build is up to date",
+                    }));
+                }
+            }
+        }
+    }
+
+    // Python: check for venv/requirements
+    let requirements = path.join("requirements.txt");
+    let venv = path.join("venv");
+    let dot_venv = path.join(".venv");
+    if requirements.exists() {
+        let has_venv = venv.exists() || dot_venv.exists();
+        if !has_venv {
+            checks.push(serde_json::json!({
+                "type": "python",
+                "status": "missing",
+                "message": "No virtualenv found. Run: python -m venv .venv && pip install -r requirements.txt",
+                "fix_command": "pip install -r requirements.txt",
+            }));
+        } else {
+            let venv_dir = if venv.exists() { &venv } else { &dot_venv };
+            let req_mtime = std::fs::metadata(&requirements).and_then(|m| m.modified()).ok();
+            let venv_mtime = std::fs::metadata(venv_dir).and_then(|m| m.modified()).ok();
+            if let (Some(req_t), Some(venv_t)) = (req_mtime, venv_mtime) {
+                if req_t > venv_t {
+                    checks.push(serde_json::json!({
+                        "type": "python",
+                        "status": "stale",
+                        "message": "requirements.txt is newer than venv. Run: pip install -r requirements.txt",
+                        "fix_command": "pip install -r requirements.txt",
+                    }));
+                } else {
+                    checks.push(serde_json::json!({
+                        "type": "python",
+                        "status": "fresh",
+                        "message": "Dependencies are up to date",
+                    }));
+                }
+            }
+        }
+    }
+
+    // Go: check for go.sum
+    let go_sum = path.join("go.sum");
+    let go_mod = path.join("go.mod");
+    if go_mod.exists() && !go_sum.exists() {
+        checks.push(serde_json::json!({
+            "type": "go",
+            "status": "missing",
+            "message": "go.sum not found. Run: go mod tidy",
+            "fix_command": "go mod tidy",
+        }));
+    }
+
+    let any_stale = checks.iter().any(|c| {
+        c.get("status").and_then(|s| s.as_str()).map(|s| s != "fresh").unwrap_or(false)
+    });
+
+    Ok(Json(serde_json::json!({
+        "project": project.name,
+        "status": if checks.is_empty() { "no_deps_detected" } else if any_stale { "needs_update" } else { "fresh" },
+        "checks": checks,
+    })))
+}
+
+// ── Database Status ──────────────────────────────────────────────────────────
+
+/// GET /projects/{id}/db-status — check database connectivity for a project
+pub async fn db_status(
+    State(state): State<AppState>,
+    Path(id): Path<i64>,
+) -> Result<Json<serde_json::Value>, StatusCode> {
+    let project = state.registry.get_project(id).ok_or(StatusCode::NOT_FOUND)?;
+
+    // Collect env vars to find database URLs
+    let global_secrets = state.secrets.get_all(crate::secrets::GLOBAL);
+    let project_secrets = state.secrets.get_all(id);
+    let dotenv = crate::env_file::read_env_files(&project.path);
+
+    let mut all_env: std::collections::HashMap<String, String> = std::collections::HashMap::new();
+    for (k, v) in global_secrets { all_env.insert(k, v); }
+    for (k, v) in project_secrets { all_env.insert(k, v); }
+    for entry in &dotenv { all_env.insert(entry.key.clone(), entry.value.clone()); }
+
+    // Find database connection strings
+    let db_keys = ["DATABASE_URL", "DB_URL", "POSTGRES_URL", "MYSQL_URL",
+                    "REDIS_URL", "MONGO_URL", "MONGODB_URI", "DB_HOST",
+                    "PGHOST", "MYSQL_HOST"];
+
+    let mut databases = Vec::new();
+
+    for key in &db_keys {
+        if let Some(val) = all_env.get(*key) {
+            let db_info = parse_db_url(key, val);
+            // Try TCP connection to verify reachability
+            let reachable = if let (Some(host), Some(port)) = (&db_info.host, db_info.port) {
+                tokio::time::timeout(
+                    std::time::Duration::from_secs(3),
+                    tokio::net::TcpStream::connect(format!("{}:{}", host, port)),
+                ).await.map(|r| r.is_ok()).unwrap_or(false)
+            } else {
+                false
+            };
+
+            databases.push(serde_json::json!({
+                "env_var": key,
+                "type": db_info.db_type,
+                "host": db_info.host,
+                "port": db_info.port,
+                "database": db_info.database,
+                "reachable": reachable,
+                "status": if reachable { "connected" } else { "unreachable" },
+            }));
+        }
+    }
+
+    // Also check Docker for common DB containers
+    let docker_dbs = detect_docker_databases().await;
+    for db in docker_dbs {
+        // Skip if we already found this DB via env vars
+        let port = db.get("port").and_then(|p| p.as_u64()).unwrap_or(0) as u16;
+        let already_listed = databases.iter().any(|d| {
+            d.get("port").and_then(|p| p.as_u64()).unwrap_or(0) as u16 == port
+        });
+        if !already_listed {
+            databases.push(db);
+        }
+    }
+
+    let status = if databases.is_empty() {
+        "no_databases_found"
+    } else if databases.iter().all(|d| d.get("reachable").and_then(|r| r.as_bool()).unwrap_or(false)) {
+        "all_connected"
+    } else if databases.iter().any(|d| d.get("reachable").and_then(|r| r.as_bool()).unwrap_or(false)) {
+        "partial"
+    } else {
+        "all_unreachable"
+    };
+
+    Ok(Json(serde_json::json!({
+        "project": project.name,
+        "status": status,
+        "databases": databases,
+    })))
+}
+
+struct DbInfo {
+    db_type: String,
+    host: Option<String>,
+    port: Option<u16>,
+    database: Option<String>,
+}
+
+fn parse_db_url(key: &str, value: &str) -> DbInfo {
+    // Try URL parsing: postgres://user:pass@host:port/dbname
+    if value.contains("://") {
+        let parts: Vec<&str> = value.splitn(2, "://").collect();
+        let scheme = parts[0].to_lowercase();
+        let db_type = match scheme.as_str() {
+            "postgres" | "postgresql" => "postgres",
+            "mysql" | "mysql2" => "mysql",
+            "redis" | "rediss" => "redis",
+            "mongodb" | "mongodb+srv" => "mongodb",
+            "sqlite" | "sqlite3" => "sqlite",
+            _ => &scheme,
+        }.to_string();
+
+        if let Some(rest) = parts.get(1) {
+            // Strip user:pass@ prefix
+            let after_auth = if let Some(at) = rest.find('@') {
+                &rest[at + 1..]
+            } else {
+                rest
+            };
+            // Parse host:port/dbname
+            let (host_port, database) = if let Some(slash) = after_auth.find('/') {
+                (&after_auth[..slash], Some(after_auth[slash + 1..].split('?').next().unwrap_or("").to_string()))
+            } else {
+                (after_auth, None)
+            };
+            let (host, port) = if let Some(colon) = host_port.rfind(':') {
+                let port_str = &host_port[colon + 1..];
+                (Some(host_port[..colon].to_string()), port_str.parse::<u16>().ok())
+            } else {
+                (Some(host_port.to_string()), default_port(&db_type))
+            };
+
+            return DbInfo { db_type, host, port, database };
+        }
+        return DbInfo { db_type, host: None, port: None, database: None };
+    }
+
+    // Fallback: infer type from key name
+    let db_type = if key.contains("POSTGRES") || key.contains("PG") {
+        "postgres"
+    } else if key.contains("MYSQL") {
+        "mysql"
+    } else if key.contains("REDIS") {
+        "redis"
+    } else if key.contains("MONGO") {
+        "mongodb"
+    } else {
+        "unknown"
+    }.to_string();
+
+    // Value might be just a host or host:port
+    let (host, port) = if value.contains(':') {
+        let parts: Vec<&str> = value.rsplitn(2, ':').collect();
+        (Some(parts[1].to_string()), parts[0].parse::<u16>().ok())
+    } else {
+        (Some(value.to_string()), default_port(&db_type))
+    };
+
+    DbInfo { db_type, host, port, database: None }
+}
+
+fn default_port(db_type: &str) -> Option<u16> {
+    match db_type {
+        "postgres" => Some(5432),
+        "mysql" => Some(3306),
+        "redis" => Some(6379),
+        "mongodb" => Some(27017),
+        _ => None,
+    }
+}
+
+/// Detect common database containers from Docker
+async fn detect_docker_databases() -> Vec<serde_json::Value> {
+    let output = tokio::process::Command::new("docker")
+        .args(["ps", "--format", "{{.Names}}\t{{.Image}}\t{{.Ports}}\t{{.State}}"])
+        .stdout(std::process::Stdio::piped())
+        .stderr(std::process::Stdio::piped())
+        .output()
+        .await;
+
+    let mut dbs = Vec::new();
+    if let Ok(out) = output {
+        for line in String::from_utf8_lossy(&out.stdout).lines() {
+            let parts: Vec<&str> = line.split('\t').collect();
+            if parts.len() < 4 { continue; }
+            let image = parts[1].to_lowercase();
+            let db_type = if image.contains("postgres") {
+                "postgres"
+            } else if image.contains("mysql") || image.contains("mariadb") {
+                "mysql"
+            } else if image.contains("redis") {
+                "redis"
+            } else if image.contains("mongo") {
+                "mongodb"
+            } else if image.contains("elasticsearch") || image.contains("opensearch") {
+                "elasticsearch"
+            } else {
+                continue; // Not a DB container
+            };
+
+            let ports = parse_docker_ports(parts[2]);
+            let port = ports.first().copied().or(default_port(db_type));
+            let reachable = if let Some(p) = port {
+                tokio::time::timeout(
+                    std::time::Duration::from_secs(2),
+                    tokio::net::TcpStream::connect(format!("127.0.0.1:{}", p)),
+                ).await.map(|r| r.is_ok()).unwrap_or(false)
+            } else {
+                false
+            };
+
+            dbs.push(serde_json::json!({
+                "env_var": null,
+                "type": db_type,
+                "source": "docker",
+                "container": parts[0],
+                "image": parts[1],
+                "host": "127.0.0.1",
+                "port": port,
+                "reachable": reachable,
+                "status": if reachable { "connected" } else { "unreachable" },
+            }));
+        }
+    }
+    dbs
+}
+
 // ── Stack Orchestration Endpoints ─────────────────────────────────────────────
 
 #[derive(Serialize)]

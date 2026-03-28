@@ -127,6 +127,27 @@ pub struct HealthCheckParams {
 }
 
 #[derive(Serialize, Deserialize, JsonSchema)]
+pub struct DockerStatusParams {}
+
+#[derive(Serialize, Deserialize, JsonSchema)]
+pub struct GetResourcesParams {
+    /// Project name
+    pub name: String,
+}
+
+#[derive(Serialize, Deserialize, JsonSchema)]
+pub struct CheckDepsParams {
+    /// Project name
+    pub name: String,
+}
+
+#[derive(Serialize, Deserialize, JsonSchema)]
+pub struct DbStatusParams {
+    /// Project name
+    pub name: String,
+}
+
+#[derive(Serialize, Deserialize, JsonSchema)]
 pub struct ListStacksParams {}
 
 #[derive(Serialize, Deserialize, JsonSchema)]
@@ -597,6 +618,78 @@ impl McpServer {
             url = format!("{}?path={}", url, path);
         }
         match reqwest::get(&url).await {
+            Ok(resp) => resp.text().await.unwrap_or_default(),
+            Err(_) => "havn server not running.".to_string(),
+        }
+    }
+
+    // ── Environment Awareness Tools ────────────────────────────────────────
+
+    /// List all running Docker containers with their port mappings.
+    /// Use to check if databases (Postgres, Redis, MongoDB) or other
+    /// infrastructure services are running in Docker.
+    #[tool(
+        name = "docker_status",
+        description = "List running Docker containers with port mappings. Use to check if databases (Postgres, Redis, MongoDB) or infrastructure services are running."
+    )]
+    async fn docker_status(&self, _params: Parameters<DockerStatusParams>) -> String {
+        match reqwest::get(&format!("{}/docker", self.api_url)).await {
+            Ok(resp) => resp.text().await.unwrap_or_default(),
+            Err(_) => "havn server not running.".to_string(),
+        }
+    }
+
+    /// Get CPU and memory usage for a project's processes.
+    /// Use when the developer says their machine is slow, or to check
+    /// if a service is consuming excessive resources.
+    #[tool(
+        name = "get_resources",
+        description = "Get CPU and memory usage for a project's processes. Use when the machine is slow or to identify resource hogs."
+    )]
+    async fn get_resources(&self, params: Parameters<GetResourcesParams>) -> String {
+        let id = match self.resolve_project_id(&params.0.name).await {
+            Ok(id) => id,
+            Err(e) => return e,
+        };
+        match reqwest::get(&format!("{}/projects/{}/resources", self.api_url, id)).await {
+            Ok(resp) => resp.text().await.unwrap_or_default(),
+            Err(_) => "havn server not running.".to_string(),
+        }
+    }
+
+    /// Check if a project's dependencies are up to date.
+    /// Compares lock file timestamps against installed dependencies.
+    /// Detects stale node_modules, outdated cargo builds, and missing virtualenvs.
+    /// Returns fix commands when deps need updating.
+    #[tool(
+        name = "check_deps",
+        description = "Check if dependencies are up to date (node_modules, cargo build, pip venv). Returns fix commands if stale. Use before starting a service that might fail due to missing deps."
+    )]
+    async fn check_deps(&self, params: Parameters<CheckDepsParams>) -> String {
+        let id = match self.resolve_project_id(&params.0.name).await {
+            Ok(id) => id,
+            Err(e) => return e,
+        };
+        match reqwest::get(&format!("{}/projects/{}/deps", self.api_url, id)).await {
+            Ok(resp) => resp.text().await.unwrap_or_default(),
+            Err(_) => "havn server not running.".to_string(),
+        }
+    }
+
+    /// Check database connectivity for a project.
+    /// Finds database URLs from env vars and .env files, tests TCP connectivity,
+    /// and detects database containers running in Docker.
+    /// Use when a service fails with "connection refused" or database errors.
+    #[tool(
+        name = "db_status",
+        description = "Check database connectivity for a project. Finds DB URLs from env vars, tests connectivity, detects Docker DB containers. Use when a service has database connection errors."
+    )]
+    async fn db_status(&self, params: Parameters<DbStatusParams>) -> String {
+        let id = match self.resolve_project_id(&params.0.name).await {
+            Ok(id) => id,
+            Err(e) => return e,
+        };
+        match reqwest::get(&format!("{}/projects/{}/db-status", self.api_url, id)).await {
             Ok(resp) => resp.text().await.unwrap_or_default(),
             Err(_) => "havn server not running.".to_string(),
         }
