@@ -2,7 +2,19 @@ use clap::{Parser, Subcommand};
 use std::path::PathBuf;
 
 #[derive(Parser)]
-#[command(name = "havn", about = "Map local ports to project directories", version)]
+#[command(
+    name = "havn",
+    about = "The MCP server that gives AI agents eyes and hands on your local dev environment",
+    long_about = "havn scans your local ports, maps them to project directories, detects frameworks,\n\
+                   and exposes 24 MCP tools for AI agents to see and control your dev environment.\n\n\
+                   Quick start:\n  \
+                   havn              Start dashboard at localhost:9390\n  \
+                   havn status       See what's running\n  \
+                   havn mcp          Start MCP server for AI tools\n  \
+                   havn tools        List all 24 MCP tools\n  \
+                   havn update       Self-update to latest release",
+    version
+)]
 pub struct Cli {
     /// Port for the dashboard server
     #[arg(short, long, default_value = "9390")]
@@ -67,6 +79,8 @@ pub enum Command {
     },
     /// Check for updates and self-update to the latest release
     Update,
+    /// List all MCP tools available to AI agents
+    Tools,
 }
 
 #[derive(Subcommand)]
@@ -457,6 +471,54 @@ pub async fn secret(args: &Cli, action: &SecretAction) {
             }
         }
     }
+}
+
+pub fn list_tools() {
+    println!("havn MCP Tools (24 total)");
+    println!("=========================");
+    println!("Configure in Claude Code / Cursor: {{ \"mcpServers\": {{ \"havn\": {{ \"command\": \"havn\", \"args\": [\"mcp\"] }} }} }}");
+    println!();
+    println!("DISCOVERY");
+    println!("  list_projects        List all running projects with ports and frameworks");
+    println!("  get_project          Get details about a specific project");
+    println!("  get_system_overview  Full snapshot of your dev environment (start here)");
+    println!("  get_version          Check havn version and available updates");
+    println!();
+    println!("PROCESS CONTROL");
+    println!("  kill_port            Kill the process on a specific port");
+    println!("  restart_and_verify   Restart a project and wait until healthy");
+    println!("  run_command          Run a shell command in a project's directory");
+    println!();
+    println!("STACK ORCHESTRATION");
+    println!("  list_stacks          List all defined stacks with running status");
+    println!("  get_stack            Detailed stack status with dependency graph");
+    println!("  start_stack          Start services in dependency order, verify health");
+    println!("  stop_stack           Graceful shutdown in reverse dependency order");
+    println!();
+    println!("DEBUGGING");
+    println!("  get_errors           Recent stderr, panics, and exceptions for a project");
+    println!("  get_logs             Stdout/stderr logs (verify fixes after restart)");
+    println!("  diagnose_stack       Find root cause of failures across services");
+    println!("  health_check         Check if a port is responding (HTTP status + latency)");
+    println!();
+    println!("ENVIRONMENT");
+    println!("  get_effective_env    Merged env vars (.env + secrets) for a project");
+    println!("  validate_env         Pre-flight check: port conflicts, missing vars");
+    println!("  check_deps           Dependency freshness (stale node_modules, etc.)");
+    println!("  db_status            Database connectivity + Docker DB detection");
+    println!();
+    println!("INFRASTRUCTURE");
+    println!("  docker_status        Running Docker containers with port mappings");
+    println!("  get_resources        CPU and memory usage per project");
+    println!();
+    println!("SECRETS");
+    println!("  list_secrets         List secret keys (values hidden)");
+    println!("  get_secret           Retrieve a decrypted secret");
+    println!("  set_secret           Store an encrypted secret (AES-256-GCM)");
+    println!();
+    println!("UTILITY");
+    println!("  find_port_for_project  Look up which port(s) a project uses");
+    println!("  find_available_port    Find a free TCP port");
 }
 
 const GITHUB_REPO: &str = "Morrigan01/havn";
