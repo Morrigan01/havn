@@ -95,6 +95,39 @@ pub struct GetEffectiveEnvParams {
     pub name: String,
 }
 
+#[derive(Serialize, Deserialize, JsonSchema)]
+pub struct ListStacksParams {}
+
+#[derive(Serialize, Deserialize, JsonSchema)]
+pub struct GetStackParams {
+    /// Stack (profile) name
+    pub name: String,
+}
+
+#[derive(Serialize, Deserialize, JsonSchema)]
+pub struct StartStackParams {
+    /// Stack (profile) name to start
+    pub name: String,
+}
+
+#[derive(Serialize, Deserialize, JsonSchema)]
+pub struct StopStackParams {
+    /// Stack (profile) name to stop
+    pub name: String,
+}
+
+#[derive(Serialize, Deserialize, JsonSchema)]
+pub struct DiagnoseStackParams {
+    /// Stack (profile) name to diagnose
+    pub name: String,
+}
+
+#[derive(Serialize, Deserialize, JsonSchema)]
+pub struct ValidateEnvParams {
+    /// Stack (profile) name to validate
+    pub name: String,
+}
+
 #[tool_router]
 impl McpServer {
     pub fn new(api_url: String) -> Self {
@@ -412,6 +445,121 @@ impl McpServer {
             Err(_) => "havn server not running.".to_string(),
         }
     }
+
+    // ── Stack Orchestration MCP Tools ────────────────────────────────────────
+
+    /// List all defined stacks (profiles) with their projects and running status.
+    #[tool(
+        name = "list_stacks",
+        description = "List all defined stacks with their projects and running status. A stack is a named group of projects that can be started/stopped together."
+    )]
+    async fn list_stacks(&self, _params: Parameters<ListStacksParams>) -> String {
+        match reqwest::get(&format!("{}/profiles", self.api_url)).await {
+            Ok(resp) => resp.text().await.unwrap_or_default(),
+            Err(_) => "havn server not running.".to_string(),
+        }
+    }
+
+    /// Get detailed status of a stack: per-project running state, ports, and dependency edges.
+    #[tool(
+        name = "get_stack",
+        description = "Get detailed status of a stack: which projects are running, healthy, or stopped, their ports, and the dependency graph."
+    )]
+    async fn get_stack(&self, params: Parameters<GetStackParams>) -> String {
+        let id = match self.resolve_profile_id(&params.0.name).await {
+            Ok(id) => id,
+            Err(e) => return e,
+        };
+        match reqwest::get(&format!("{}/profiles/{}/detail", self.api_url, id)).await {
+            Ok(resp) => resp.text().await.unwrap_or_default(),
+            Err(_) => "havn server not running.".to_string(),
+        }
+    }
+
+    /// Start all projects in a stack in dependency order, inject environment variables,
+    /// and verify each service becomes healthy before starting the next.
+    /// Returns per-service status: healthy, failed, or skipped (if a dependency failed).
+    /// This is a blocking call — may take up to 180 seconds for large stacks.
+    #[tool(
+        name = "start_stack",
+        description = "Start all projects in a stack in dependency order, verify each is healthy. Returns per-service status. Use this to bring up a full dev environment. May take up to 180s."
+    )]
+    async fn start_stack(&self, params: Parameters<StartStackParams>) -> String {
+        let id = match self.resolve_profile_id(&params.0.name).await {
+            Ok(id) => id,
+            Err(e) => return e,
+        };
+        let client = reqwest::Client::new();
+        match client
+            .post(format!("{}/profiles/{}/start-stack", self.api_url, id))
+            .timeout(std::time::Duration::from_secs(180))
+            .send()
+            .await
+        {
+            Ok(resp) => resp.text().await.unwrap_or_default(),
+            Err(e) if e.is_timeout() => {
+                "Stack startup timed out after 180s. Some services may still be starting. Use get_stack to check status.".to_string()
+            }
+            Err(_) => "havn server not running.".to_string(),
+        }
+    }
+
+    /// Gracefully stop all projects in a stack in reverse dependency order.
+    /// Skips projects that are shared with other running stacks.
+    #[tool(
+        name = "stop_stack",
+        description = "Stop all projects in a stack in reverse dependency order. Skips shared dependencies still needed by other stacks."
+    )]
+    async fn stop_stack(&self, params: Parameters<StopStackParams>) -> String {
+        let id = match self.resolve_profile_id(&params.0.name).await {
+            Ok(id) => id,
+            Err(e) => return e,
+        };
+        let client = reqwest::Client::new();
+        match client
+            .post(format!("{}/profiles/{}/stop-stack", self.api_url, id))
+            .timeout(std::time::Duration::from_secs(60))
+            .send()
+            .await
+        {
+            Ok(resp) => resp.text().await.unwrap_or_default(),
+            Err(_) => "havn server not running.".to_string(),
+        }
+    }
+
+    /// Trace failures across a stack: identify root cause services, affected dependents,
+    /// and suggest recovery actions.
+    #[tool(
+        name = "diagnose_stack",
+        description = "Diagnose a stack: find which service crashed (root cause), which are affected (cascading failure), and get a recovery suggestion. Use when something in the stack is broken."
+    )]
+    async fn diagnose_stack(&self, params: Parameters<DiagnoseStackParams>) -> String {
+        let id = match self.resolve_profile_id(&params.0.name).await {
+            Ok(id) => id,
+            Err(e) => return e,
+        };
+        match reqwest::get(&format!("{}/profiles/{}/diagnose", self.api_url, id)).await {
+            Ok(resp) => resp.text().await.unwrap_or_default(),
+            Err(_) => "havn server not running.".to_string(),
+        }
+    }
+
+    /// Check for environment misconfigurations before starting a stack:
+    /// port conflicts, missing env vars, and projects without start commands.
+    #[tool(
+        name = "validate_env",
+        description = "Pre-flight check for a stack: detect port conflicts, missing environment variables, and projects without start commands. Run this before start_stack to catch issues early."
+    )]
+    async fn validate_env(&self, params: Parameters<ValidateEnvParams>) -> String {
+        let id = match self.resolve_profile_id(&params.0.name).await {
+            Ok(id) => id,
+            Err(e) => return e,
+        };
+        match reqwest::get(&format!("{}/profiles/{}/validate-env", self.api_url, id)).await {
+            Ok(resp) => resp.text().await.unwrap_or_default(),
+            Err(_) => "havn server not running.".to_string(),
+        }
+    }
 }
 
 impl McpServer {
@@ -431,6 +579,24 @@ impl McpServer {
             .find(|p| p.get("name").and_then(|n| n.as_str()) == Some(name))
             .and_then(|p| p.get("id").and_then(|i| i.as_i64()))
             .ok_or_else(|| format!("Project '{}' not found.", name))
+    }
+
+    /// Helper: resolve a stack (profile) name to its ID.
+    async fn resolve_profile_id(&self, name: &str) -> Result<i64, String> {
+        let profiles_resp = reqwest::get(&format!("{}/profiles", self.api_url))
+            .await
+            .map_err(|_| "havn server not running.".to_string())?;
+
+        let profiles: Vec<serde_json::Value> = profiles_resp
+            .json()
+            .await
+            .map_err(|e| format!("Error: {}", e))?;
+
+        profiles
+            .iter()
+            .find(|p| p.get("name").and_then(|n| n.as_str()) == Some(name))
+            .and_then(|p| p.get("id").and_then(|i| i.as_i64()))
+            .ok_or_else(|| format!("Stack '{}' not found.", name))
     }
 }
 
