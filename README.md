@@ -229,4 +229,4 @@ Contributions are welcome! Please open an issue or pull request.
 
 ## License
 
-MIT
+[BSL 1.1](LICENSE) — free for non-commercial use. Commercial use by organizations with more than 10 employees requires a license. Converts to Apache 2.0 on 2030-03-28.

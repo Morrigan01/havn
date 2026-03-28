@@ -3,7 +3,7 @@ name = "havn"
 version = "0.1.0"
 edition = "2021"
 description = "Map local ports to project directories — CLI, dashboard, and MCP server"
-license = "MIT"
+license = "BSL-1.1"
 repository = "https://github.com/omarelloumi/havn"
 
 [dependencies]
